@@ -24,6 +24,14 @@ func newRepo(t *testing.T, files map[string]string) *gitx.Repo {
 	return &gitx.Repo{Root: dir}
 }
 
+func keys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 func buildIndex(t *testing.T, files map[string]string) *Index {
 	t.Helper()
 	// ListFiles needs a git repo; index the worktree directly instead by
@@ -32,7 +40,7 @@ func buildIndex(t *testing.T, files map[string]string) *Index {
 	ix := &Index{
 		byName:  map[string][]Def{},
 		imports: map[string]map[string]string{},
-		module:  modulePath(context.Background(), repo, gitx.RevWorktree),
+		modules: findModules(context.Background(), repo, gitx.RevWorktree, keys(files)),
 	}
 	for name := range files {
 		if filepath.Ext(name) == ".go" {
@@ -256,5 +264,85 @@ func (b *Box[T]) Put(v T) {}
 	}
 	if got.Def.Recv != "Box" {
 		t.Errorf("receiver = %q, want Box", got.Def.Recv)
+	}
+}
+
+// TestNestedModuleResolves is the monorepo shape: go.mod lives in a
+// subdirectory, not at the repository root. Assuming a single root module made
+// every qualified lookup fall through to a repository-wide guess, which is why
+// resolution was near-useless on a real work repository.
+func TestNestedModuleResolves(t *testing.T) {
+	ix := buildIndex(t, map[string]string{
+		"services/api/go.mod": "module corp.example/api\n",
+		"services/api/cmd/main.go": `package main
+
+import "corp.example/api/internal/usecases"
+
+func main() { usecases.NewFilesInteractor() }
+`,
+		"services/api/internal/usecases/files.go": "package usecases\n\nfunc NewFilesInteractor() {}\n",
+		// A same-named decoy elsewhere in the repo, outside the module.
+		"tools/scratch/files.go": "package scratch\n\nfunc NewFilesInteractor() {}\n",
+	})
+
+	got, err := ix.Lookup("NewFilesInteractor", "usecases", "services/api/cmd/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Def.Path != "services/api/internal/usecases/files.go" {
+		t.Errorf("resolved to %s, want the module-internal declaration", got.Def.Path)
+	}
+	if got.Confidence != "exact-package" {
+		t.Errorf("confidence = %q, want exact-package", got.Confidence)
+	}
+}
+
+// TestMultipleModulesPickMostSpecific: a nested module must beat its parent.
+func TestMultipleModulesPickMostSpecific(t *testing.T) {
+	ix := buildIndex(t, map[string]string{
+		"go.mod":             "module corp.example/root\n",
+		"sub/go.mod":         "module corp.example/root/sub\n",
+		"sub/pkg/thing.go":   "package pkg\n\nfunc Do() {}\n",
+		"other/pkg/thing.go": "package pkg\n\nfunc Do() {}\n",
+		"main.go": `package main
+
+import "corp.example/root/sub/pkg"
+
+func main() { pkg.Do() }
+`,
+	})
+	got, err := ix.Lookup("Do", "pkg", "main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Def.Path != "sub/pkg/thing.go" {
+		t.Errorf("resolved to %s, want sub/pkg/thing.go (nested module wins)", got.Def.Path)
+	}
+}
+
+// TestPackageNameFallback: when the module layout cannot be resolved at all,
+// matching the qualifier against the declared package name still beats
+// guessing across the whole repository.
+func TestPackageNameFallback(t *testing.T) {
+	ix := buildIndex(t, map[string]string{
+		// No go.mod anywhere: nothing can be resolved through imports.
+		"cmd/main.go": `package main
+
+import "vendored/usecases"
+
+func main() { usecases.NewFilesInteractor() }
+`,
+		"internal/usecases/files.go": "package usecases\n\nfunc NewFilesInteractor() {}\n",
+		"internal/other/files.go":    "package other\n\nfunc NewFilesInteractor() {}\n",
+	})
+	got, err := ix.Lookup("NewFilesInteractor", "usecases", "cmd/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Def.Path != "internal/usecases/files.go" {
+		t.Errorf("resolved to %s, want the package actually named usecases", got.Def.Path)
+	}
+	if got.Confidence != "package-name" {
+		t.Errorf("confidence = %q, want package-name", got.Confidence)
 	}
 }

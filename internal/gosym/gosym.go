@@ -32,13 +32,23 @@ type Def struct {
 	Pkg  string `json:"pkg,omitempty"`  // package name as declared
 }
 
+// goModule is one go.mod found in the repository.
+type goModule struct {
+	dir  string // repo-relative directory holding go.mod ("" at the root)
+	path string // the module path it declares
+}
+
 // Index holds every declaration in the repository at one revision.
 type Index struct {
 	byName map[string][]Def
 	// imports maps a file to the import paths of its qualifiers, so `util.X`
 	// in one file and `util.X` in another can resolve to different packages.
 	imports map[string]map[string]string
-	module  string
+	// Every module in the repository, not just one at the root: a repository
+	// with go.mod in a subdirectory, or several modules, is normal, and
+	// assuming a single root module made every qualified lookup fall through
+	// to a repository-wide guess.
+	modules []goModule
 }
 
 // maxIndexFiles bounds the work for very large repositories.
@@ -54,7 +64,7 @@ func Build(ctx context.Context, repo *gitx.Repo, rev string) (*Index, error) {
 	ix := &Index{
 		byName:  make(map[string][]Def),
 		imports: make(map[string]map[string]string),
-		module:  modulePath(ctx, repo, rev),
+		modules: findModules(ctx, repo, rev, paths),
 	}
 
 	seen := 0
@@ -208,18 +218,33 @@ func (ix *Index) Lookup(name, qual, fromPath string) (Result, error) {
 				if hit := filterDir(candidates, dir); len(hit) > 0 {
 					return result(hit, "exact-package"), nil
 				}
-			} else {
-				// The qualifier names an import that is not part of this
-				// repository — the standard library or a dependency. Falling
-				// through would "resolve" fmt.Print to some unrelated local
-				// method of the same name, which is worse than saying no.
+			} else if len(filterPkg(candidates, qual)) == 0 {
+				// The qualifier names an import outside this repository — the
+				// standard library or a dependency — and nothing here declares
+				// a package by that name. Falling through would "resolve"
+				// fmt.Print to an unrelated local method, which is worse than
+				// saying no.
+				//
+				// When a local package *is* named after the qualifier, the
+				// import simply could not be mapped (a vendored path, a
+				// replace directive, a module layout we did not find), so the
+				// package-name match below is the better answer.
 				return Result{}, fmt.Errorf("%s.%s is declared in %s, outside this repository",
 					qual, name, importPath)
 			}
 		}
 	}
 
-	// 2. Same package as the caller. For a qualified name this is wrong unless
+	// 2. The qualifier matches a package's declared name. Weaker than reading
+	// the import, but far better than a repository-wide guess, and it is what
+	// rescues a repository whose module layout we could not resolve.
+	if qual != "" {
+		if hit := filterPkg(candidates, qual); len(hit) > 0 {
+			return result(preferNonTest(hit), "package-name"), nil
+		}
+	}
+
+	// 3. Same package as the caller. For a qualified name this is wrong unless
 	// the qualifier was a variable (a method call), which is exactly the case
 	// go/types would be needed to settle.
 	if hit := filterDir(candidates, fromDir); len(hit) > 0 {
@@ -232,7 +257,7 @@ func (ix *Index) Lookup(name, qual, fromPath string) (Result, error) {
 		return result(hit, "same-package"), nil
 	}
 
-	// 3/4. Anywhere, preferring non-test declarations.
+	// 4/5. Anywhere, preferring non-test declarations.
 	preferred := preferNonTest(candidates)
 	confidence := "guess"
 	if len(preferred) == 1 {
@@ -241,24 +266,79 @@ func (ix *Index) Lookup(name, qual, fromPath string) (Result, error) {
 	return result(preferred, confidence), nil
 }
 
-// dirOf maps a module-internal import path to a repository directory.
+// dirOf maps an import path to a repository directory, using the most
+// specific module that claims it. Longest match wins, so a nested module
+// beats its parent.
 func (ix *Index) dirOf(importPath string) (string, bool) {
-	if ix.module == "" {
-		return "", false
+	best := -1
+	for i, m := range ix.modules {
+		if m.path == "" {
+			continue
+		}
+		if importPath != m.path && !strings.HasPrefix(importPath, m.path+"/") {
+			continue
+		}
+		if best < 0 || len(m.path) > len(ix.modules[best].path) {
+			best = i
+		}
 	}
-	if importPath == ix.module {
-		return ".", true
-	}
-	if !strings.HasPrefix(importPath, ix.module+"/") {
+	if best < 0 {
 		return "", false // external dependency, not in this repository
 	}
-	return strings.TrimPrefix(importPath, ix.module+"/"), true
+	m := ix.modules[best]
+	sub := strings.TrimPrefix(strings.TrimPrefix(importPath, m.path), "/")
+	dir := path.Join(m.dir, sub)
+	if dir == "" {
+		dir = "."
+	}
+	return dir, true
+}
+
+// findModules locates every go.mod in the repository.
+func findModules(ctx context.Context, repo *gitx.Repo, rev string, paths []string) []goModule {
+	var out []goModule
+	for _, p := range paths {
+		if path.Base(p) != "go.mod" {
+			continue
+		}
+		f, err := gitx.ReadFile(ctx, repo, rev, p)
+		if err != nil {
+			continue
+		}
+		for _, line := range f.Lines {
+			rest, ok := strings.CutPrefix(strings.TrimSpace(line), "module")
+			if !ok {
+				continue
+			}
+			mp := strings.TrimSpace(strings.Trim(strings.TrimSpace(rest), `"`))
+			if mp == "" {
+				break
+			}
+			dir := path.Dir(p)
+			if dir == "." {
+				dir = ""
+			}
+			out = append(out, goModule{dir: dir, path: mp})
+			break
+		}
+	}
+	return out
 }
 
 func filterDir(defs []Def, dir string) []Def {
 	var out []Def
 	for _, d := range defs {
 		if path.Dir(d.Path) == dir {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+func filterPkg(defs []Def, pkgName string) []Def {
+	var out []Def
+	for _, d := range defs {
+		if d.Pkg == pkgName {
 			out = append(out, d)
 		}
 	}
@@ -305,13 +385,14 @@ func result(defs []Def, confidence string) Result {
 	if len(sorted) > 1 {
 		res.Ambiguous = true
 		res.Others = sorted[1:]
-		if len(res.Others) > 12 {
-			res.Others = res.Others[:12]
+		if len(res.Others) > 30 {
+			res.Others = res.Others[:30]
 		}
 	}
 	return res
 }
 
+// modulePath reads the root go.mod, for callers that only need the main one.
 func modulePath(ctx context.Context, repo *gitx.Repo, rev string) string {
 	f, err := gitx.ReadFile(ctx, repo, rev, "go.mod")
 	if err != nil {

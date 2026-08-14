@@ -1,11 +1,11 @@
 // Bootstrap: panes, canvas transform, selection wiring, layout persistence.
 
 import { api } from './api.js';
-import { state, el, toast, debounce, DRAG_TYPE } from './store.js';
+import { state, el, toast, debounce, DRAG_TYPE, BASE_ROW_H, BASE_FONT, rowH } from './store.js';
 import { renderTree } from './tree.js';
 import {
   createCard, removeCard, setCardListener, applyLOD, rebuildAll, setCollapsed,
-  redrawStrips,
+  redrawStrips, relayoutAll, jumpChange,
 } from './card.js';
 import {
   initArrows, renderArrows, loadArrows, toWorld, deleteSelectedArrow, linkImports,
@@ -165,6 +165,9 @@ function openFile(path, opts = {}) {
   return createCard(path, { ...spot, ...opts });
 }
 
+/** True when the event asks for a separate card rather than reusing one. */
+function wantsNewCard(ev) { return ev.shiftKey; }
+
 function arrange() {
   const cards = state.selection.size ? selectedCards() : state.cards;
   if (!cards.length) return;
@@ -289,6 +292,7 @@ function snapshot() {
     scale: state.scale,
     diffMode: state.diffMode,
     lodStyle: state.lodStyle,
+    fontScale: state.fontScale,
     viewed: [...state.viewed],
     cards: state.cards.map(c => ({
       path: c.path, x: c.x, y: c.y, w: c.w, h: c.h,
@@ -314,6 +318,7 @@ async function restoreLayout() {
   state.viewed = new Set(saved.viewed || []);
   if (saved.diffMode) setDiffMode(saved.diffMode, false);
   if (saved.lodStyle) setLodStyle(saved.lodStyle, false);
+  if (saved.fontScale) setFontScale(saved.fontScale, false);
 
   const remap = new Map();
   for (const c of saved.cards) {
@@ -413,10 +418,31 @@ function setDiffMode(mode, rebuild = true) {
   }
 }
 
+/**
+ * Code font size.
+ *
+ * Zooming out shrinks everything, so working permanently zoomed out needs a
+ * bigger base size rather than a different rendering. Row height moves with
+ * it, because row virtualisation depends on every row being exactly one
+ * known height.
+ */
+function setFontScale(k, apply = true) {
+  state.fontScale = Math.min(2.5, Math.max(0.6, k));
+  const root = document.documentElement.style;
+  root.setProperty('--row-h', `${rowH()}px`);
+  root.setProperty('--code-font', `${(BASE_FONT * state.fontScale).toFixed(2)}px`);
+  if (apply) {
+    relayoutAll();
+    saveLayoutSoon();
+    toast(`code font ${Math.round(state.fontScale * 100)}%`);
+  }
+}
+
 const LOD_STYLES = [
   { value: 'texture', label: 'shape', title: 'Code shape: indentation and line length, coloured by change' },
   { value: 'bars', label: 'bars', title: 'How much changed, and roughly where' },
   { value: 'plain', label: 'off', title: 'Name and counts only' },
+  { value: 'text', label: 'text', title: 'Never substitute: keep the code, just small' },
 ];
 
 function setLodStyle(value, redraw = true) {
@@ -425,6 +451,7 @@ function setLodStyle(value, redraw = true) {
   document.getElementById('btn-lod').textContent = opt.label;
   document.getElementById('btn-lod').title = `Zoomed-out cards: ${opt.title} (z)`;
   if (redraw) {
+    applyLOD();      // 'text' opts out of the substitution entirely
     redrawStrips();
     saveLayoutSoon();
   }
@@ -434,6 +461,17 @@ function cycleLodStyle() {
   const i = LOD_STYLES.findIndex(o => o.value === state.lodStyle);
   setLodStyle(LOD_STYLES[(i + 1) % LOD_STYLES.length].value);
   toast(LOD_STYLES.find(o => o.value === state.lodStyle).title);
+}
+
+/** Moves the active card to its next or previous change. */
+function stepChange(dir) {
+  const cards = state.selection.size ? selectedCards()
+    : state.lastCard && state.cards.includes(state.lastCard) ? [state.lastCard]
+    : state.cards.slice(0, 1);
+  if (!cards.length) { toast('open a card first'); return; }
+  for (const c of cards) {
+    if (!jumpChange(c, dir)) toast(`${c.path}: no changes to step through`);
+  }
 }
 
 let allCollapsed = false;
@@ -448,7 +486,49 @@ function collapseAll() {
  * Opens the declaration of a Ctrl-clicked identifier and links back to the
  * call site, so following a chain of calls leaves a visible trail.
  */
-async function jumpToDefinition(sourceCard, name, qual) {
+/**
+ * Offers the alternatives when resolution is not certain.
+ *
+ * Without a type checker some names genuinely cannot be resolved, so a wrong
+ * best-guess must never be a dead end: the list stays on screen and any
+ * candidate can be opened instead.
+ */
+function showCandidates(sourceCard, res, name, qual) {
+  document.getElementById('def-picker')?.remove();
+
+  const box = el('div');
+  box.id = 'def-picker';
+  const label = qual ? `${qual}.${name}` : name;
+  box.appendChild(el('div', 'picker-head',
+    `${label} — ${res.confidence === 'guess' ? 'best guess' : res.confidence}, pick another:`));
+
+  for (const def of [res.def, ...(res.others || [])]) {
+    const row = el('button', 'picker-row');
+    row.appendChild(el('span', 'picker-kind', def.kind));
+    row.appendChild(el('span', 'picker-name', (def.recv ? def.recv + '.' : '') + def.name));
+    row.appendChild(el('span', 'picker-path', `${def.path}:${def.line}`));
+    row.addEventListener('click', () => {
+      const target = openFile(def.path, { line: def.line });
+      if (target && target !== sourceCard) addArrow(sourceCard, target, name);
+      box.remove();
+      onGeometryChange();
+    });
+    box.appendChild(row);
+  }
+
+  const close = el('button', 'picker-close', 'dismiss');
+  close.addEventListener('click', () => box.remove());
+  box.appendChild(close);
+
+  document.body.appendChild(box);
+  setTimeout(() => {
+    document.addEventListener('pointerdown', function once(ev) {
+      if (!box.contains(ev.target)) { box.remove(); document.removeEventListener('pointerdown', once); }
+    });
+  }, 0);
+}
+
+async function jumpToDefinition(sourceCard, name, qual, separate = false) {
   // Acknowledge immediately. The first lookup builds the declaration index,
   // which on a large repository takes long enough that silence reads as
   // "nothing happened" and invites a second click.
@@ -469,15 +549,21 @@ async function jumpToDefinition(sourceCard, name, qual) {
     'exact-package': '',
     'same-package': '',
     unique: '',
+    'package-name': ' — matched by package name',
     guess: ` — best guess, ${(res.others || []).length} other candidate(s)`,
   }[res.confidence] ?? '';
 
-  const target = openFile(def.path, { line: def.line });
+  const target = openFile(def.path, { line: def.line, duplicate: separate });
   if (target && target !== sourceCard) {
     addArrow(sourceCard, target, name);
   }
   toast(`${def.kind} ${def.recv ? def.recv + '.' : ''}${def.name} → ${def.path}:${def.line}${note}`);
   onGeometryChange();
+
+  // Anything less than certain gets the alternatives offered alongside.
+  if (res.ambiguous || res.confidence === 'guess' || res.confidence === 'package-name') {
+    showCandidates(sourceCard, res, name, qual);
+  }
 }
 
 /** Asks the server which open Go files import one another, and links them. */
@@ -570,6 +656,11 @@ function setupKeys() {
       case 's': setDiffMode('split'); break;
       case 'i': drawImportArrows(); break;
       case 'z': cycleLodStyle(); break;
+      case 'n': stepChange(1); break;
+      case 'N': stepChange(-1); break;
+      case '+': case '=': ev.preventDefault(); setFontScale(state.fontScale + 0.1); break;
+      case '-': case '_': ev.preventDefault(); setFontScale(state.fontScale - 0.1); break;
+      case '0': ev.preventDefault(); setFontScale(1); break;
       case '\\': document.body.classList.toggle('sidebar-hidden'); break;
     }
   });
@@ -645,7 +736,7 @@ function setupDebugOverlay() {
 async function main() {
   setCardListener(onGeometryChange);
   window.addEventListener('dc:jump', ev =>
-    jumpToDefinition(ev.detail.card, ev.detail.name, ev.detail.qual));
+    jumpToDefinition(ev.detail.card, ev.detail.name, ev.detail.qual, ev.detail.separate));
 
   // Show the jump cursor while the modifier is held.
   const setJumpCursor = on => document.body.classList.toggle('jumping', on);
@@ -661,6 +752,7 @@ async function main() {
   trackToolbarHeight();
   setupDebugOverlay();
   setLodStyle(state.lodStyle, false);
+  setFontScale(state.fontScale, false);
 
   try {
     state.meta = await api.meta();

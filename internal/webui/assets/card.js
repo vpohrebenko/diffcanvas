@@ -9,7 +9,7 @@
 // which is why side-by-side keeps working at every step of the continuum.
 
 import { api } from './api.js';
-import { state, el, ROW_H, LOD_SCALE, splitPath } from './store.js';
+import { state, el, rowH, LOD_SCALE, splitPath } from './store.js';
 import { select, isSelected, selectedCards } from './selection.js';
 
 const OVERSCAN = 6;
@@ -70,6 +70,7 @@ export function createCard(path, opts = {}) {
   };
   state.cards.push(card);
   buildCardDOM(card);
+  card.el.style.zIndex = String(topZ()); // never open behind existing cards
   loadCard(card);
   onChange();
   return card;
@@ -172,8 +173,16 @@ function buildCardDOM(card) {
   const portR = el('div', 'port right');
   portL.title = portR.title = 'Drag to another card to link them';
 
-  const resize = el('div', 'resize');
-  node.append(head, body, strip, foot, portL, portR, resize);
+  // Handles on every edge and corner; the old single bottom-right grip meant
+  // growing a card upwards or leftwards required moving it first.
+  const grips = [];
+  for (const dir of ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']) {
+    const g = el('div', `grip grip-${dir}`);
+    g.dataset.dir = dir;
+    g.addEventListener('pointerdown', ev => startResize(card, ev, dir));
+    grips.push(g);
+  }
+  node.append(head, body, strip, foot, portL, portR, ...grips);
   document.getElementById('cards').appendChild(node);
 
   Object.assign(card, {
@@ -184,6 +193,17 @@ function buildCardDOM(card) {
 
   body.addEventListener('scroll', () => renderRows(card), { passive: true });
 
+  // A selection dragged down one side of a split view used to take the other
+  // side with it, because the two columns are siblings in one text flow.
+  // Suppressing selection on the opposite column for the duration of the drag
+  // keeps a copied block to the side it was dragged on.
+  body.addEventListener('pointerdown', ev => {
+    const side = ev.target.closest?.('.side');
+    body.classList.remove('sel-l', 'sel-r');
+    if (!side) return;
+    body.classList.add(side.classList.contains('l') ? 'sel-l' : 'sel-r');
+  });
+
   // Ctrl/Cmd-click an identifier to open its declaration, the gesture an IDE
   // already trains into your hands.
   body.addEventListener('click', ev => {
@@ -193,7 +213,9 @@ function buildCardDOM(card) {
     ev.preventDefault();
     ev.stopPropagation();
     window.dispatchEvent(new CustomEvent('dc:jump', {
-      detail: { card, name: found.name, qual: found.qual },
+      // Shift asks for a separate card: two call sites in one file are often
+      // far apart, and reusing the card loses the one you came from.
+      detail: { card, name: found.name, qual: found.qual, separate: ev.shiftKey },
     }));
   });
 
@@ -219,8 +241,10 @@ function buildCardDOM(card) {
     });
   }
 
-  resize.addEventListener('pointerdown', ev => startResize(card, ev));
-  node.addEventListener('pointerdown', () => { node.style.zIndex = String(topZ()); }, true);
+  node.addEventListener('pointerdown', () => {
+    node.style.zIndex = String(topZ());
+    state.lastCard = card;
+  }, true);
 }
 
 function iconBtn(glyph, title, act) {
@@ -320,6 +344,7 @@ function applyData(card) {
   syncViewButtons(card);
 
   card.rows = buildRows(card);
+  card.anchors = null;
   card.renderedView = effectiveView(card);
   layoutRows(card);
 
@@ -330,13 +355,49 @@ function applyData(card) {
   onChange();
 }
 
+/** Indices of rows that begin a run of changed lines. */
+function changeAnchors(card) {
+  if (card.anchors) return card.anchors;
+  const out = [];
+  let inRun = false;
+  card.rows.forEach((r, i) => {
+    const changed =
+      (r.kind === 'line' && (r.t === '+' || r.t === '-' || r.changed)) ||
+      (r.kind === 'newline' && r.added) ||
+      (r.kind === 'pair' && ((r.l && r.l.t === '-') || (r.r && r.r.t === '+')));
+    if (changed && !inRun) out.push(i);
+    inRun = changed;
+  });
+  card.anchors = out;
+  return out;
+}
+
+/** Scrolls a card to the next (or previous) run of changed lines. */
+export function jumpChange(card, dir) {
+  const anchors = changeAnchors(card);
+  if (!anchors.length) return false;
+  const h = rowH();
+  const current = card.bodyEl.scrollTop / h;
+  let target;
+  if (dir > 0) {
+    target = anchors.find(i => i > current + 0.5);
+    if (target === undefined) target = anchors[0]; // wrap
+  } else {
+    const before = anchors.filter(i => i < current - 0.5);
+    target = before.length ? before[before.length - 1] : anchors[anchors.length - 1];
+  }
+  card.bodyEl.scrollTop = Math.max(0, (target - 1) * h);
+  renderRows(card);
+  return true;
+}
+
 /** Scrolls a card so a given new-side line sits near the top. */
 export function scrollToLine(card, line) {
   const index = card.rows.findIndex(r =>
     (r.kind === 'line' && r.new === line) ||
     (r.kind === 'pair' && r.r && r.r.new === line));
   if (index < 0) return;
-  card.bodyEl.scrollTop = Math.max(0, (index - 2) * ROW_H);
+  card.bodyEl.scrollTop = Math.max(0, (index - 2) * rowH());
   renderRows(card);
 }
 
@@ -344,6 +405,15 @@ export function scrollToLine(card, line) {
 function buildRows(card) {
   const d = card.data;
   if (d.binary) return [{ kind: 'note', text: 'binary file — not shown' }];
+  if (d.status === 'deleted') {
+    const rows = [{ kind: 'note', text: `file deleted — ${d.dels} lines removed`, warn: true }];
+    for (const h of d.hunks || []) {
+      for (const l of h.lines) {
+        rows.push({ kind: 'line', t: '-', old: l.old, new: 0, segs: l.segs });
+      }
+    }
+    return rows;
+  }
 
   const rows = [];
   if (d.mode === 'full') {
@@ -356,8 +426,13 @@ function buildRows(card) {
   }
 
   const view = effectiveView(card);
+  let prevEnd = 0;
   for (const h of d.hunks || []) {
-    rows.push({ kind: 'hunk', header: h.header, oldStart: h.oldStart, newStart: h.newStart });
+    rows.push({
+      kind: 'hunk', header: h.header, oldStart: h.oldStart, newStart: h.newStart,
+      skipped: prevEnd > 0 ? h.newStart - prevEnd : 0,
+    });
+    prevEnd = h.newStart + countNewLines(h);
     if (view === 'split') {
       // Pairing comes from the server so it agrees with the word-level diff.
       for (const [oi, ni] of h.pairs || []) {
@@ -378,7 +453,8 @@ function buildRows(card) {
 }
 
 function layoutRows(card) {
-  card.spacerEl.style.height = `${card.rows.length * ROW_H}px`;
+  card.anchors = null;
+  card.spacerEl.style.height = `${card.rows.length * rowH()}px`;
   card.renderedFirst = card.renderedLast = -1;
   renderRows(card);
   drawStrip(card);
@@ -388,8 +464,9 @@ function renderRows(card) {
   if (card.lod || card.collapsed) return;
 
   const view = card.bodyEl;
-  const first = Math.max(0, Math.floor(view.scrollTop / ROW_H) - OVERSCAN);
-  const visible = Math.ceil(view.clientHeight / ROW_H) + OVERSCAN * 2;
+  const h = rowH();
+  const first = Math.max(0, Math.floor(view.scrollTop / h) - OVERSCAN);
+  const visible = Math.ceil(view.clientHeight / h) + OVERSCAN * 2;
   const last = Math.min(card.rows.length, first + visible);
 
   if (card.renderedFirst === first && card.renderedLast === last) return;
@@ -399,12 +476,12 @@ function renderRows(card) {
   const frag = document.createDocumentFragment();
   for (let i = first; i < last; i++) frag.appendChild(renderRow(card.rows[i]));
   card.rowsEl.replaceChildren(frag);
-  card.rowsEl.style.transform = `translateY(${first * ROW_H}px)`;
+  card.rowsEl.style.transform = `translateY(${first * rowH()}px)`;
 }
 
 function renderRow(row) {
   if (row.kind === 'hunk') return renderHunkRow(row);
-  if (row.kind === 'note') return el('div', 'row note', row.text);
+  if (row.kind === 'note') return el('div', `row note${row.warn ? ' warn' : ''}`, row.text);
   if (row.kind === 'pair') return renderPairRow(row);
   if (row.kind === 'newline') return renderNewRow(row);
 
@@ -434,13 +511,24 @@ function renderNewRow(row) {
   return node;
 }
 
+/** Lines the hunk contributes to the new side, for the skip count. */
+function countNewLines(h) {
+  let n = 0;
+  for (const l of h.lines) if (l.t !== '-') n++;
+  return n;
+}
+
 function renderHunkRow(row) {
   const node = el('div', 'row hunk');
-  node.appendChild(document.createTextNode(`${row.oldStart} → ${row.newStart}`));
-  if (row.header) {
-    node.appendChild(document.createTextNode('  '));
-    node.appendChild(el('span', 'hunk-ctx', row.header));
+  // Say what was skipped. A bare "@@ 298 → 321" reads as the content being
+  // cut off rather than as unchanged code omitted between two hunks.
+  // Spacing comes from CSS, not from text nodes: the row is a flex container
+  // and whitespace-only children are discarded, which ran the parts together.
+  if (row.skipped > 0) {
+    node.appendChild(el('span', 'hunk-skip', `⋯ ${row.skipped} unchanged lines`));
   }
+  node.appendChild(el('span', 'hunk-num', `${row.oldStart} → ${row.newStart}`));
+  if (row.header) node.appendChild(el('span', 'hunk-ctx', row.header));
   return node;
 }
 
@@ -711,7 +799,10 @@ function drawTexture(ctx, rows, w, h) {
 }
 
 export function applyLOD() {
-  const lod = state.scale < LOD_SCALE;
+  // 'text' opts out of the zoomed-out substitution entirely: the code just
+  // gets small, which is what you want if you work zoomed out and would
+  // rather raise the font size than read a diagram.
+  const lod = state.lodStyle !== 'text' && state.scale < LOD_SCALE;
   for (const card of state.cards) {
     if (card.lod !== lod) {
       card.lod = lod;
@@ -751,6 +842,14 @@ function clearLODLabel(card) {
 }
 
 /** Rebuilds every card after a global unified/split switch. */
+/** Re-lays out every card after the code font size changes. */
+export function relayoutAll() {
+  for (const card of state.cards) {
+    if (!card.data) continue;
+    layoutRows(card);
+  }
+}
+
 /** Redraws every zoomed-out card, after the zoom style is changed. */
 export function redrawStrips() {
   for (const card of state.cards) if (card.data) drawStrip(card);
@@ -814,19 +913,35 @@ function startDrag(card, ev) {
   window.addEventListener('pointerup', up);
 }
 
-function startResize(card, ev) {
+function startResize(card, ev, dir = 'se') {
   if (card.collapsed) return; // nothing to resize; would leave an empty box
   ev.preventDefault();
   ev.stopPropagation();
   const startX = ev.clientX, startY = ev.clientY;
-  const ow = card.w, oh = card.h;
+  const ow = card.w, oh = card.h, ox = card.x, oy = card.y;
   document.body.classList.add('dragging');
 
+  const MIN_W = 280, MIN_H = 90;
   const move = e => {
-    card.w = Math.max(280, ow + (e.clientX - startX) / state.scale);
-    card.h = Math.max(90, oh + (e.clientY - startY) / state.scale);
+    const dx = (e.clientX - startX) / state.scale;
+    const dy = (e.clientY - startY) / state.scale;
+
+    if (dir.includes('e')) card.w = Math.max(MIN_W, ow + dx);
+    if (dir.includes('s')) card.h = Math.max(MIN_H, oh + dy);
+    // Dragging a top or left edge moves the origin as well as the size, so
+    // the opposite edge stays put.
+    if (dir.includes('w')) {
+      card.w = Math.max(MIN_W, ow - dx);
+      card.x = ox + (ow - card.w);
+    }
+    if (dir.includes('n')) {
+      card.h = Math.max(MIN_H, oh - dy);
+      card.y = oy + (oh - card.h);
+    }
     card.el.style.width = `${card.w}px`;
     card.el.style.height = `${card.h}px`;
+    card.el.style.left = `${card.x}px`;
+    card.el.style.top = `${card.y}px`;
     renderRows(card);
     onChange();
   };

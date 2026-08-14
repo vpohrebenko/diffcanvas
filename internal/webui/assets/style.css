@@ -11,11 +11,13 @@
 
 :root {
   /* Neutral, faintly cool dark. Deliberately not GitHub's blue-black. */
-  --bg: #101317;
-  --surface: #171b21;
+  /* The canvas is darker than the cards, and card borders are light enough to
+   * find at a glance: dark cards on a dark canvas made edges hard to see. */
+  --bg: #0b0e12;
+  --surface: #191e26;
   --surface-2: #1e232b;
   --surface-3: #262c36;
-  --border: #2a3039;
+  --border: #333b47;
   --border-strong: #3a424e;
 
   --fg: #dde3ea;
@@ -45,6 +47,7 @@
   --syn-bui: #b99bf0;
 
   --row-h: 18px;
+  --code-font: 11px;
   --toolbar-h: 46px;
   --sidebar-w: 310px;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
@@ -283,7 +286,7 @@ kbd {
 .card {
   position: absolute; display: flex; flex-direction: column;
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-  box-shadow: 0 2px 10px rgba(0,0,0,.35); overflow: visible; contain: layout;
+  box-shadow: 0 2px 14px rgba(0,0,0,.55); overflow: visible; contain: layout;
 }
 .card > .card-head { border-radius: 8px 8px 0 0; }
 .card.dragging { box-shadow: 0 14px 44px rgba(0,0,0,.75); border-color: var(--border-strong); }
@@ -368,13 +371,22 @@ kbd {
 .card:hover .port, .card.selected .port { opacity: 1; }
 .port:hover { transform: scale(1.35); background: var(--link); }
 
-.resize {
-  position: absolute; right: 0; bottom: 0; width: 16px; height: 16px;
-  cursor: nwse-resize; z-index: 5; opacity: 0; transition: opacity .12s;
+/* Resize from any edge or corner. */
+.grip { position: absolute; z-index: 6; }
+.card.collapsed .grip { display: none; }
+.grip-n { top: -4px; left: 10px; right: 10px; height: 8px; cursor: ns-resize; }
+.grip-s { bottom: -4px; left: 10px; right: 10px; height: 8px; cursor: ns-resize; }
+.grip-w { left: -4px; top: 10px; bottom: 10px; width: 8px; cursor: ew-resize; }
+.grip-e { right: -4px; top: 10px; bottom: 10px; width: 8px; cursor: ew-resize; }
+.grip-nw { top: -5px; left: -5px; width: 14px; height: 14px; cursor: nwse-resize; }
+.grip-ne { top: -5px; right: -5px; width: 14px; height: 14px; cursor: nesw-resize; }
+.grip-sw { bottom: -5px; left: -5px; width: 14px; height: 14px; cursor: nesw-resize; }
+.grip-se {
+  bottom: -5px; right: -5px; width: 16px; height: 16px; cursor: nwse-resize;
+  opacity: 0; transition: opacity .12s;
   background: linear-gradient(135deg, transparent 52%, var(--border-strong) 52%, var(--border-strong) 72%, transparent 72%);
 }
-.card:hover .resize { opacity: 1; }
-.card.collapsed .resize { display: none; }
+.card:hover .grip-se { opacity: 1; }
 
 /* ── diff rows ────────────────────────────────────────────────────────── */
 
@@ -390,17 +402,25 @@ kbd {
   border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
   padding-left: 9px; overflow: hidden; text-overflow: ellipsis;
 }
-.row.hunk .hunk-ctx { color: var(--syn-typ); }
+.row.hunk .hunk-ctx { color: var(--syn-typ); margin-left: 12px; }
+.row.hunk .hunk-skip { color: var(--fg-faint); margin-right: 14px; }
+.row.hunk .hunk-num { color: var(--fg-muted); }
 .row.note { color: var(--fg-faint); font-style: italic; padding-left: 9px; }
+/* A deleted file is otherwise an empty dark card, which reads as nothing
+ * being there rather than as content having been removed. */
+.row.note.warn {
+  color: var(--del-fg); background: var(--del-tint); box-shadow: inset 2px 0 0 var(--del);
+}
 
 .gut {
   flex-shrink: 0; width: 36px; text-align: right; padding-right: 8px;
-  color: var(--fg-faint); font-size: 9px; user-select: none; opacity: .75;
+  color: var(--fg-faint); font-size: calc(var(--code-font) * .82);
+  user-select: none; opacity: .75;
 }
 .sign { flex-shrink: 0; width: 10px; text-align: center; opacity: .8; }
 .row.add .sign { color: var(--add-fg); }
 .row.del .sign { color: var(--del-fg); }
-.txt { flex: 1; padding-right: 10px; min-width: 0; }
+.txt { flex: 1; padding-right: 10px; min-width: 0; font-size: var(--code-font); }
 
 /* The saturated colour lives here: the words that actually changed. */
 .w { border-radius: 2px; padding: 1px 0; }
@@ -408,12 +428,32 @@ kbd {
 .row.del .w, .side.del .w { background: var(--del-word); }
 
 .row .side { display: flex; flex: 1 1 50%; min-width: 0; overflow: hidden; }
+.card-body.sel-l .side.r, .card-body.sel-r .side.l { user-select: none; }
 .row .side.l { border-right: 1px solid var(--border); }
 .row .side.blank { background: rgba(0,0,0,.18); }
 .row .side.add { background: var(--add-tint); box-shadow: inset 2px 0 0 var(--add); }
 .row .side.del { background: var(--del-tint); box-shadow: inset 2px 0 0 var(--del); }
 
 body.jumping .card-body { cursor: alias; }
+
+/* Candidate picker for jump-to-definition. */
+#def-picker {
+  position: fixed; left: 50%; top: 70px; transform: translateX(-50%); z-index: 500;
+  background: var(--surface); border: 1px solid var(--accent); border-radius: 8px;
+  box-shadow: 0 10px 40px rgba(0,0,0,.7); padding: 6px; max-height: 60vh;
+  overflow: auto; min-width: 440px; max-width: 90vw;
+}
+.picker-head { color: var(--fg-muted); font-size: 10px; padding: 5px 8px 7px; }
+.picker-row {
+  display: flex; align-items: baseline; gap: 8px; width: 100%; text-align: left;
+  padding: 5px 8px; border-radius: 5px; color: var(--fg); font-size: 11px;
+}
+.picker-row:hover { background: var(--accent-dim); }
+.picker-kind { color: var(--syn-kw); width: 52px; flex-shrink: 0; font-size: 10px; }
+.picker-name { color: var(--fg); flex-shrink: 0; }
+.picker-path { color: var(--fg-faint); font-size: 10px; margin-left: auto; }
+.picker-close { color: var(--fg-faint); font-size: 10px; padding: 6px 8px; width: 100%; text-align: center; }
+.picker-close:hover { color: var(--fg); }
 
 .nonl { color: var(--fg-faint); font-style: italic; opacity: .8; }
 

@@ -11,15 +11,23 @@ export const state = {
   selection: new Set(),
   nextId: 1,
   diffMode: 'unified', // or 'split'
-  lodStyle: 'texture', // zoomed-out card: texture | bars | plain
+  lodStyle: 'texture', // zoomed-out card: texture | bars | plain | text
+  fontScale: 1,        // code font multiplier
   pan: { x: 60, y: 30 },
   scale: 1,
   selectedArrow: null,
 };
 
-/** Row height in pixels. Must match --row-h in style.css: virtualisation
- *  relies on every row being exactly this tall. */
-export const ROW_H = 18;
+/** Row height at font scale 1. */
+export const BASE_ROW_H = 18;
+export const BASE_FONT = 11;
+
+/**
+ * Current row height in pixels. Virtualisation relies on every row being
+ * exactly this tall, so anything that changes the code font must update this
+ * and --row-h together.
+ */
+export function rowH() { return Math.round(BASE_ROW_H * state.fontScale); }
 
 /** Below this world scale, cards render as a density strip instead of text. */
 export const LOD_SCALE = 0.4;
