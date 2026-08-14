@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="dc-token" content="__TOKEN__">
+<title>diffcanvas</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header id="toolbar">
+  <button class="icon-btn" id="btn-sidebar" title="Hide the sidebar (\)" aria-label="Toggle sidebar">☰</button>
+
+  <div class="spec">
+    <div class="spec-label" id="spec-label">loading…</div>
+    <div class="spec-meta" id="spec-meta"></div>
+  </div>
+
+  <!-- Appears only while cards are selected. -->
+  <div class="selection-bar" id="selection-bar" hidden>
+    <span class="sel-count" id="sel-count">0 selected</span>
+    <button class="tbtn" id="sel-align">Align</button>
+    <button class="tbtn" id="sel-collapse">Collapse</button>
+    <button class="tbtn danger" id="sel-close">Close</button>
+  </div>
+
+  <div class="tools">
+    <div class="seg" role="group" aria-label="Diff layout">
+      <button class="tbtn active" id="mode-unified" title="Unified (u)">Unified</button>
+      <button class="tbtn" id="mode-split" title="Side by side (s)">Split</button>
+    </div>
+    <span class="tool-sep"></span>
+    <button class="tbtn" id="btn-layout" title="Tidy cards into columns (a)">Arrange</button>
+    <button class="tbtn" id="btn-fit" title="Fit everything in view (f)">Fit</button>
+    <button class="tbtn" id="btn-collapse" title="Collapse every card (c)">Collapse</button>
+    <span class="tool-sep"></span>
+    <button class="tbtn danger" id="btn-clear" title="Remove every card">Clear</button>
+  </div>
+</header>
+
+<aside id="sidebar">
+  <nav class="tabs" role="tablist">
+    <button class="tab active" id="tab-changes" role="tab">Changes</button>
+    <button class="tab" id="tab-files" role="tab">Files</button>
+    <button class="tab" id="tab-search" role="tab">Search</button>
+  </nav>
+
+  <section class="pane active" id="pane-changes">
+    <div class="pane-head">
+      <input id="filter" type="search" placeholder="Filter paths…" autocomplete="off" spellcheck="false">
+      <div class="stat-row" id="change-stats"></div>
+    </div>
+    <div class="tree" id="tree"></div>
+  </section>
+
+  <section class="pane" id="pane-files">
+    <div class="pane-head">
+      <input id="file-filter" type="search" placeholder="Filter tracked files…" autocomplete="off" spellcheck="false">
+      <div class="hint-text">Files the diff did not touch.</div>
+    </div>
+    <div class="tree" id="file-tree"></div>
+  </section>
+
+  <section class="pane" id="pane-search">
+    <div class="pane-head">
+      <input id="grep" type="search" placeholder="Search contents…" autocomplete="off" spellcheck="false">
+      <label class="check"><input type="checkbox" id="grep-case"> ignore case</label>
+      <div class="hint-text" id="grep-status">Press Enter to search.</div>
+    </div>
+    <div class="tree" id="grep-results"></div>
+  </section>
+</aside>
+
+<main id="canvas">
+  <div id="empty-state">
+    <strong>Pick a file to start</strong>
+    <span>Click or drag anything from the tree.</span>
+    <span class="keys">
+      <kbd>drag</kbd> pan · <kbd>shift</kbd>+drag select · <kbd>wheel</kbd> zoom · <kbd>f</kbd> fit
+    </span>
+  </div>
+
+  <div id="world">
+    <div id="cards"></div>
+    <!-- Above the cards: an arrow hidden behind a card is useless. -->
+    <svg id="arrow-layer" aria-hidden="true">
+      <defs>
+        <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="9" refY="5"
+                orient="auto" markerUnits="userSpaceOnUse">
+          <path d="M0,0.5 L10,5 L0,9.5 Z"></path>
+        </marker>
+        <marker id="arrowhead-sel" markerWidth="10" markerHeight="10" refX="9" refY="5"
+                orient="auto" markerUnits="userSpaceOnUse">
+          <path d="M0,0.5 L10,5 L0,9.5 Z"></path>
+        </marker>
+      </defs>
+      <g id="arrow-paths"></g>
+    </svg>
+  </div>
+
+  <div id="marquee" hidden></div>
+  <canvas id="minimap" width="196" height="132"></canvas>
+  <div id="zoom-badge">100%</div>
+  <div id="toast" hidden></div>
+</main>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

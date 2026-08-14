@@ -1,0 +1,408 @@
+/* diffcanvas
+ *
+ * Design rules this file follows:
+ *  1. Code is the content. Chrome stays quiet and appears on hover.
+ *  2. Colour intensity means precision. A changed line gets a faint tint and a
+ *     solid edge bar; only the words that actually changed get saturated
+ *     colour. Fifteen open cards should not read as a wall of red and green.
+ *  3. One accent for "you are interacting with this", a different one for
+ *     arrows, so selection never reads as a connection.
+ */
+
+:root {
+  /* Neutral, faintly cool dark. Deliberately not GitHub's blue-black. */
+  --bg: #101317;
+  --surface: #171b21;
+  --surface-2: #1e232b;
+  --surface-3: #262c36;
+  --border: #2a3039;
+  --border-strong: #3a424e;
+
+  --fg: #dde3ea;
+  --fg-muted: #8d96a3;
+  --fg-faint: #5b6472;
+
+  --accent: #67c9d6;          /* interaction: selection, focus, hover */
+  --accent-dim: rgba(103, 201, 214, .16);
+  --link: #e0a458;            /* arrows only */
+
+  --add: #46a758;
+  --add-tint: rgba(70, 167, 88, .085);
+  --add-word: rgba(70, 167, 88, .30);
+  --add-fg: #86d99a;
+
+  --del: #e5534b;
+  --del-tint: rgba(229, 83, 75, .085);
+  --del-word: rgba(229, 83, 75, .30);
+  --del-fg: #f5a19c;
+
+  /* Syntax, slightly desaturated so word marks stay the loudest thing. */
+  --syn-kw:  #d78fc0;
+  --syn-str: #8fc7e8;
+  --syn-num: #e3a072;
+  --syn-com: #626c7a;
+  --syn-typ: #7fd6c4;
+  --syn-bui: #b99bf0;
+
+  --row-h: 18px;
+  --toolbar-h: 46px;
+  --sidebar-w: 310px;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+button, input { font: inherit; color: inherit; }
+button { background: none; border: none; cursor: pointer; }
+
+/* While dragging anything on the canvas, kill text selection everywhere.
+ * Without this a pan drag paints the page blue. */
+body.dragging, body.dragging * { user-select: none !important; }
+
+/* ── toolbar ──────────────────────────────────────────────────────────── */
+
+#toolbar {
+  position: fixed; inset: 0 0 auto 0; height: var(--toolbar-h); z-index: 300;
+  display: flex; align-items: center; gap: 12px; padding: 0 12px;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+}
+
+.icon-btn {
+  color: var(--fg-muted); padding: 4px 7px; border-radius: 6px; font-size: 13px;
+  flex-shrink: 0;
+}
+.icon-btn:hover { color: var(--fg); background: var(--surface-3); }
+
+.spec { flex: 1; min-width: 0; }
+.spec-label {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 12px; color: var(--fg);
+}
+.spec-meta {
+  color: var(--fg-faint); font-size: 10px; margin-top: 1px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.tools { display: flex; gap: 5px; align-items: center; flex-shrink: 0; }
+.tool-sep { width: 1px; height: 18px; background: var(--border); margin: 0 3px; }
+
+.tbtn {
+  background: var(--surface-2); border: 1px solid var(--border); color: var(--fg-muted);
+  padding: 5px 10px; border-radius: 6px; white-space: nowrap; font-size: 11px;
+  transition: color .1s, background .1s, border-color .1s;
+}
+.tbtn:hover { background: var(--surface-3); color: var(--fg); border-color: var(--border-strong); }
+.tbtn.active {
+  background: var(--accent-dim); border-color: var(--accent); color: var(--accent);
+}
+.tbtn.danger:hover { border-color: var(--del); color: var(--del-fg); background: rgba(229,83,75,.1); }
+
+.seg { display: flex; }
+.seg .tbtn { border-radius: 0; }
+.seg .tbtn:first-child { border-radius: 6px 0 0 6px; }
+.seg .tbtn:last-child { border-radius: 0 6px 6px 0; margin-left: -1px; }
+
+/* [hidden] must beat display:flex, or the bar shows "0 selected" forever. */
+.selection-bar[hidden] { display: none; }
+.selection-bar {
+  display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+  padding: 3px 4px 3px 10px; border-radius: 7px;
+  background: var(--accent-dim); border: 1px solid var(--accent);
+}
+.sel-count { color: var(--accent); font-size: 11px; white-space: nowrap; }
+
+/* ── sidebar ──────────────────────────────────────────────────────────── */
+
+#sidebar {
+  position: fixed; top: var(--toolbar-h); left: 0; bottom: 0; width: var(--sidebar-w);
+  z-index: 200; display: flex; flex-direction: column;
+  background: var(--surface); border-right: 1px solid var(--border);
+}
+body.sidebar-hidden #sidebar { display: none; }
+body.sidebar-hidden #canvas { left: 0; }
+
+.tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.tab {
+  flex: 1; border-bottom: 2px solid transparent; color: var(--fg-faint);
+  padding: 9px 4px; font-size: 11px; transition: color .1s;
+}
+.tab:hover { color: var(--fg); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.pane { display: none; flex-direction: column; min-height: 0; flex: 1; }
+.pane.active { display: flex; }
+.pane-head { padding: 9px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.pane-head input[type="search"] {
+  width: 100%; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 7px 8px; outline: none; color: var(--fg);
+}
+.pane-head input[type="search"]:focus { border-color: var(--accent); }
+.hint-text { color: var(--fg-faint); font-size: 10px; margin-top: 6px; }
+.check { display: flex; align-items: center; gap: 5px; color: var(--fg-faint); font-size: 10px; margin-top: 6px; }
+.stat-row { color: var(--fg-faint); font-size: 10px; margin-top: 6px; }
+
+.tree { overflow: auto; flex: 1; padding: 4px 0 40px; }
+.tree::-webkit-scrollbar { width: 8px; }
+.tree::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+.tree::-webkit-scrollbar-track { background: transparent; }
+
+.node {
+  display: flex; align-items: center; gap: 5px; padding: 3px 8px 3px 4px;
+  cursor: pointer; white-space: nowrap; border-left: 2px solid transparent;
+}
+.node:hover { background: var(--surface-2); }
+.node.dir { color: var(--fg-muted); }
+.node.open-on-canvas { border-left-color: var(--accent); background: var(--accent-dim); }
+.node.viewed .node-name { color: var(--fg-faint); text-decoration: line-through; }
+.twist { width: 11px; flex-shrink: 0; color: var(--fg-faint); text-align: center; font-size: 9px; }
+.node-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
+.node-name .dim { color: var(--fg-faint); }
+
+/* Status as a dot rather than a letter: at 50 rows, letters are noise. */
+.dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.dot.st-added { background: var(--add); }
+.dot.st-deleted { background: var(--del); }
+.dot.st-modified { background: var(--accent); }
+.dot.st-renamed, .dot.st-copied { background: var(--link); }
+.dot.st-typechanged { background: var(--fg-faint); }
+
+.counts { font-size: 9px; flex-shrink: 0; color: var(--fg-faint); }
+.counts .a { color: var(--add-fg); }
+.counts .d { color: var(--del-fg); }
+
+.dbar {
+  width: 30px; height: 3px; background: var(--border); border-radius: 2px;
+  overflow: hidden; display: flex; flex-shrink: 0;
+}
+.dbar i { height: 100%; display: block; }
+.dbar .a { background: var(--add); }
+.dbar .d { background: var(--del); }
+
+.grep-hit { padding: 4px 8px; cursor: pointer; border-left: 2px solid transparent; }
+.grep-hit:hover { background: var(--surface-2); border-left-color: var(--accent); }
+.grep-path { color: var(--accent); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.grep-text { color: var(--fg-muted); font-size: 10px; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── canvas ───────────────────────────────────────────────────────────── */
+
+#canvas {
+  position: fixed; top: var(--toolbar-h); left: var(--sidebar-w); right: 0; bottom: 0;
+  overflow: hidden; background-color: var(--bg);
+  background-image: radial-gradient(circle, #1c222b 1.1px, transparent 1.1px);
+  background-size: 26px 26px;
+}
+#canvas.panning { cursor: grabbing; }
+#canvas.selecting { cursor: crosshair; }
+
+#world { position: absolute; top: 0; left: 0; width: 0; height: 0; transform-origin: 0 0; }
+#cards { position: absolute; top: 0; left: 0; }
+
+#arrow-layer {
+  position: absolute; left: 0; top: 0; width: 1px; height: 1px;
+  overflow: visible; pointer-events: none;
+}
+#arrow-layer path.link {
+  fill: none; stroke: var(--link); stroke-width: 1.8;
+  marker-end: url(#arrowhead); pointer-events: none;
+  /* Constant on-screen width regardless of zoom. Without this the arrows —
+   * the structure layer — fade to nothing at exactly the zoom level where you
+   * are trying to read the shape of the change. */
+  vector-effect: non-scaling-stroke;
+}
+#arrow-layer path.hit {
+  fill: none; stroke: transparent; stroke-width: 16;
+  pointer-events: stroke; cursor: pointer;
+  vector-effect: non-scaling-stroke;
+}
+#arrow-layer path.link.selected { stroke: var(--accent); marker-end: url(#arrowhead-sel); stroke-width: 2.6; }
+#arrow-layer path.temp { stroke: var(--accent); stroke-dasharray: 5 4; marker-end: none; }
+#arrowhead path { fill: var(--link); }
+#arrowhead-sel path { fill: var(--accent); }
+
+/* Label as a chip so it stays readable where the line crosses a card. */
+#arrow-layer .label-bg { fill: var(--surface-2); stroke: var(--link); stroke-width: 1; rx: 4; pointer-events: none; }
+#arrow-layer .label-tx { fill: var(--link); font-size: 10px; font-family: var(--mono); pointer-events: none; }
+#arrow-layer .selected .label-bg { stroke: var(--accent); }
+#arrow-layer .selected .label-tx { fill: var(--accent); }
+
+#marquee[hidden] { display: none; }
+#marquee {
+  position: absolute; z-index: 80; pointer-events: none;
+  border: 1px solid var(--accent); background: var(--accent-dim); border-radius: 2px;
+}
+
+#empty-state {
+  position: absolute; inset: 0; display: grid; place-content: center; justify-items: center;
+  gap: 7px; color: var(--fg-faint); text-align: center; pointer-events: none;
+}
+#empty-state strong { color: var(--fg-muted); font-size: 14px; font-weight: 600; }
+#empty-state .keys { margin-top: 12px; font-size: 10px; }
+kbd {
+  background: var(--surface-2); border: 1px solid var(--border); border-bottom-width: 2px;
+  border-radius: 4px; padding: 1px 5px; font-size: 10px; color: var(--fg-muted);
+}
+
+#minimap {
+  position: absolute; right: 12px; bottom: 12px; z-index: 60;
+  background: rgba(16, 19, 23, .9); border: 1px solid var(--border);
+  border-radius: 8px; cursor: pointer;
+}
+#minimap.hidden { display: none; }
+#zoom-badge {
+  position: absolute; left: 12px; bottom: 12px; z-index: 60;
+  color: var(--fg-faint); font-size: 10px; pointer-events: none;
+}
+#toast {
+  position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 90;
+  background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: 7px;
+  padding: 7px 13px; color: var(--fg); font-size: 11px; box-shadow: 0 6px 22px rgba(0,0,0,.55);
+}
+
+/* ── cards ────────────────────────────────────────────────────────────── */
+
+.card {
+  position: absolute; display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(0,0,0,.35); overflow: visible; contain: layout;
+}
+.card > .card-head { border-radius: 8px 8px 0 0; }
+.card.dragging { box-shadow: 0 14px 44px rgba(0,0,0,.75); border-color: var(--border-strong); }
+.card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 2px 10px rgba(0,0,0,.4); }
+.card.link-target { border-color: var(--link); box-shadow: 0 0 0 2px rgba(224,164,88,.4); }
+.card.collapsed .card-body, .card.collapsed .card-foot { display: none; }
+.card.collapsed > .card-head { border-radius: 8px; border-bottom: none; }
+
+/* The header sets the type size and its children use relative units, so
+ * scaling this one value scales the whole header. That is what lets a
+ * zoomed-out card keep a readable name. */
+.card-head {
+  display: flex; align-items: center; gap: 7px; padding: 7px 8px; flex-shrink: 0;
+  background: var(--surface-2); border-bottom: 1px solid var(--border);
+  cursor: grab; user-select: none; font-size: 11px;
+}
+.card-head:active { cursor: grabbing; }
+.card-title {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-size: 1em;
+}
+.card-title .dim { color: var(--fg-faint); font-size: .92em; }
+.card-sub { color: var(--fg-faint); font-size: .92em; flex-shrink: 0; }
+.card-sub .a { color: var(--add-fg); }
+.card-sub .d { color: var(--del-fg); }
+
+/* Chrome appears on demand. Twenty cards should not show eighty buttons. */
+.card-actions { display: flex; gap: 1px; opacity: 0; transition: opacity .12s; flex-shrink: 0; }
+.card:hover .card-actions, .card.selected .card-actions { opacity: 1; }
+.cbtn {
+  color: var(--fg-faint); padding: 2px 4px; border-radius: 4px;
+  font-size: 1.1em; line-height: 1;
+}
+.cbtn:hover { color: var(--fg); background: var(--surface-3); }
+
+.card-body { overflow: auto; flex: 1; position: relative; }
+.card-body::-webkit-scrollbar { width: 9px; height: 9px; }
+.card-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
+.card-body::-webkit-scrollbar-track { background: transparent; }
+.rows { position: absolute; top: 0; left: 0; right: 0; will-change: transform; }
+
+.card-foot {
+  display: flex; align-items: center; gap: 8px; padding: 4px 7px; flex-shrink: 0;
+  border-top: 1px solid var(--border); background: var(--surface-2);
+  color: var(--fg-faint); font-size: 10px; border-radius: 0 0 8px 8px;
+}
+.foot-lang { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Context is a continuum, not a mode. "all" is simply maximum context, which
+ * is why side-by-side keeps working at every step. */
+.ctx-seg { display: flex; align-items: center; gap: 0; flex-shrink: 0; }
+.ctx-label { color: var(--fg-faint); margin-right: 5px; }
+.ctx-seg button {
+  color: var(--fg-faint); padding: 1px 6px; font-size: 10px;
+  border: 1px solid transparent; border-radius: 4px;
+}
+.ctx-seg button:hover { color: var(--fg); background: var(--surface-3); }
+.ctx-seg button.on { color: var(--accent); background: var(--accent-dim); border-color: var(--accent); }
+
+/* Connection ports, revealed on hover, on the card edges where a link
+ * naturally starts and ends. */
+.port {
+  position: absolute; top: 50%; width: 13px; height: 13px; margin-top: -6.5px;
+  border-radius: 50%; background: var(--surface-3); border: 1.5px solid var(--link);
+  opacity: 0; transition: opacity .12s, transform .12s; cursor: crosshair; z-index: 6;
+}
+.port.left { left: -7px; }
+.port.right { right: -7px; }
+.card:hover .port, .card.selected .port { opacity: 1; }
+.port:hover { transform: scale(1.35); background: var(--link); }
+
+.resize {
+  position: absolute; right: 0; bottom: 0; width: 16px; height: 16px;
+  cursor: nwse-resize; z-index: 5; opacity: 0; transition: opacity .12s;
+  background: linear-gradient(135deg, transparent 52%, var(--border-strong) 52%, var(--border-strong) 72%, transparent 72%);
+}
+.card:hover .resize { opacity: 1; }
+.card.collapsed .resize { display: none; }
+
+/* ── diff rows ────────────────────────────────────────────────────────── */
+
+.row { display: flex; height: var(--row-h); line-height: var(--row-h); white-space: pre; }
+
+/* Faint fill plus a solid edge bar: scannable in bulk, calm to read. */
+.row.add { background: var(--add-tint); box-shadow: inset 2px 0 0 var(--add); }
+.row.del { background: var(--del-tint); box-shadow: inset 2px 0 0 var(--del); }
+.row.changed { background: var(--add-tint); box-shadow: inset 2px 0 0 var(--add); }
+
+.row.hunk {
+  background: var(--surface-2); color: var(--fg-muted); font-size: 10px;
+  border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  padding-left: 9px; overflow: hidden; text-overflow: ellipsis;
+}
+.row.hunk .hunk-ctx { color: var(--syn-typ); }
+.row.note { color: var(--fg-faint); font-style: italic; padding-left: 9px; }
+
+.gut {
+  flex-shrink: 0; width: 36px; text-align: right; padding-right: 8px;
+  color: var(--fg-faint); font-size: 9px; user-select: none; opacity: .75;
+}
+.sign { flex-shrink: 0; width: 10px; text-align: center; opacity: .8; }
+.row.add .sign { color: var(--add-fg); }
+.row.del .sign { color: var(--del-fg); }
+.txt { flex: 1; padding-right: 10px; min-width: 0; }
+
+/* The saturated colour lives here: the words that actually changed. */
+.w { border-radius: 2px; padding: 1px 0; }
+.row.add .w, .side.add .w { background: var(--add-word); }
+.row.del .w, .side.del .w { background: var(--del-word); }
+
+.row .side { display: flex; flex: 1 1 50%; min-width: 0; overflow: hidden; }
+.row .side.l { border-right: 1px solid var(--border); }
+.row .side.blank { background: rgba(0,0,0,.18); }
+.row .side.add { background: var(--add-tint); box-shadow: inset 2px 0 0 var(--add); }
+.row .side.del { background: var(--del-tint); box-shadow: inset 2px 0 0 var(--del); }
+
+body.jumping .card-body { cursor: alias; }
+
+.nonl { color: var(--fg-faint); font-style: italic; opacity: .8; }
+
+.tok-kw  { color: var(--syn-kw); }
+.tok-str { color: var(--syn-str); }
+.tok-num { color: var(--syn-num); }
+.tok-com { color: var(--syn-com); font-style: italic; }
+.tok-typ { color: var(--syn-typ); }
+.tok-bui { color: var(--syn-bui); }
+
+/* Zoomed out: density instead of text. */
+.card.lod .card-body, .card.lod .card-foot, .card.lod .card-actions { display: none; }
+.card.lod .lod-strip { display: block; }
+.lod-strip { display: none; flex: 1; width: 100%; border-radius: 0 0 8px 8px; }

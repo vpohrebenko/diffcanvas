@@ -1,0 +1,8 @@
+# Built binaries
+/diffcanvas
+/dist/
+*.exe
+
+# Editor and OS noise
+.DS_Store
+*.swp
