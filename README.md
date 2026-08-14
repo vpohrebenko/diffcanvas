@@ -10,6 +10,8 @@ Local only. One static binary, no runtime, no install, no network.
 diffcanvas main...feature
 ```
 
+![Reading a change across several files, with arrows between them](docs/doc_hero.png)
+
 ## Why it works this way
 
 A 50-file review is mostly a navigation problem, so the design optimises for
@@ -112,6 +114,8 @@ context level and scroll position — useful for comparing two ends of one file.
 
 ### Reading the diff
 
+![Side-by-side with word-level diff](docs/doc_split.png)
+
 - **Unified / Split** (`u` / `s`), switched globally.
 - **Context continuum** per card: `3 · 10 · 40 · all`. This is how much
   unchanged code surrounds each change. There is no diff/whole-file *mode* —
@@ -125,6 +129,8 @@ context level and scroll position — useful for comparing two ends of one file.
   shown.
 
 ### Seeing the whole change
+
+![Zoomed out: each line drawn at its indentation and length](docs/doc_zoomout.png)
 
 Below 40% zoom, cards stop rendering text and become **density strips** showing
 where the additions and deletions fall in each file, drawn at a fixed pitch so a
