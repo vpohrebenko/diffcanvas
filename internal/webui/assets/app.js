@@ -16,6 +16,25 @@ import {
   setSelectionListener, refreshSelection,
 } from './selection.js';
 
+/**
+ * Publishes the toolbar's real height into --toolbar-h.
+ *
+ * The sidebar and canvas are positioned from that variable, so if the toolbar
+ * grows — wrapped controls, larger text, a zoom or scaling setting — they move
+ * down with it instead of being overlapped, and nothing in the bar is ever
+ * clipped or pushed off screen.
+ */
+function trackToolbarHeight() {
+  const bar = document.getElementById('toolbar');
+  const apply = () => {
+    const h = Math.ceil(bar.getBoundingClientRect().height);
+    if (h > 0) document.documentElement.style.setProperty('--toolbar-h', `${h}px`);
+  };
+  apply();
+  if (window.ResizeObserver) new ResizeObserver(apply).observe(bar);
+  window.addEventListener('resize', apply);
+}
+
 const canvas = document.getElementById('canvas');
 const world = document.getElementById('world');
 const minimap = document.getElementById('minimap');
@@ -556,6 +575,45 @@ function setupKeys() {
   });
 }
 
+/**
+ * `?debug=1` overlay: reports what each click actually lands on.
+ *
+ * Clickability problems here turned out to depend on display scaling, which is
+ * invisible from a screenshot alone. This makes one screenshot enough to tell
+ * whether an event reached the button you aimed at.
+ */
+function setupDebugOverlay() {
+  if (!new URLSearchParams(location.search).has('debug')) return;
+
+  const panel = el('div');
+  panel.style.cssText =
+    'position:fixed;right:8px;bottom:8px;z-index:99999;background:#000;color:#6f6;' +
+    'font:11px ui-monospace,monospace;padding:8px;border:1px solid #6f6;' +
+    'white-space:pre;pointer-events:none;max-width:60vw';
+  document.body.appendChild(panel);
+
+  const describe = node =>
+    !node ? 'null'
+      : (node.id ? '#' + node.id : node.tagName.toLowerCase()) +
+        (node.className && typeof node.className === 'string' ? '.' + node.className.split(' ')[0] : '');
+
+  const report = ev => {
+    const hit = document.elementFromPoint(ev.clientX, ev.clientY);
+    const btn = hit && hit.closest ? hit.closest('button') : null;
+    panel.textContent = [
+      `dpr=${window.devicePixelRatio}  viewport=${window.innerWidth}x${window.innerHeight}`,
+      `zoom=${(window.visualViewport ? window.visualViewport.scale : 1).toFixed(2)}` +
+        `  toolbar-h=${getComputedStyle(document.documentElement).getPropertyValue('--toolbar-h').trim()}`,
+      `click at ${Math.round(ev.clientX)},${Math.round(ev.clientY)}`,
+      `  target      ${describe(ev.target)}`,
+      `  elementFrom ${describe(hit)}`,
+      `  button      ${btn ? '#' + btn.id : 'none'}`,
+    ].join('\n');
+  };
+  window.addEventListener('pointerdown', report, true);
+  window.addEventListener('click', report, true);
+}
+
 // ── start ────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -574,6 +632,8 @@ async function main() {
   setupSearch();
   setupToolbar();
   setupKeys();
+  trackToolbarHeight();
+  setupDebugOverlay();
   setLodStyle(state.lodStyle, false);
 
   try {

@@ -71,15 +71,21 @@ body.dragging, body.dragging * { user-select: none !important; }
 
 /* ── toolbar ──────────────────────────────────────────────────────────── */
 
+/*
+ * The toolbar sizes itself and the layout follows, rather than the other way
+ * round. A fixed height clipped or pushed controls out of reach whenever the
+ * contents were taller or wider than the box — which happens with browser
+ * zoom, OS scaling, or a minimum-font-size setting, and explains why a
+ * different button stopped working at each scale. It wraps instead, and
+ * app.js publishes the measured height back into --toolbar-h so the sidebar
+ * and canvas sit below whatever it actually needs.
+ */
 #toolbar {
-  position: fixed; inset: 0 0 auto 0; height: var(--toolbar-h); z-index: 300;
-  display: flex; align-items: center; gap: 10px; padding: 0 10px;
+  position: fixed; inset: 0 0 auto 0; min-height: var(--toolbar-h); z-index: 300;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px;
+  padding: 6px 10px;
   background: var(--surface); border-bottom: 1px solid var(--border);
-  /* The right-hand group is fixed width. On a narrow window it used to push
-   * past the viewport with no way to reach what fell off the edge. */
-  overflow-x: auto; overflow-y: hidden;
 }
-#toolbar::-webkit-scrollbar { height: 0; }
 
 .icon-btn {
   color: var(--fg-muted); padding: 4px 7px; border-radius: 6px; font-size: 13px;
@@ -87,7 +93,7 @@ body.dragging, body.dragging * { user-select: none !important; }
 }
 .icon-btn:hover { color: var(--fg); background: var(--surface-3); }
 
-.spec { flex: 1 1 0; min-width: 40px; }
+.spec { flex: 1 1 220px; min-width: 120px; }
 .spec-label {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-size: 12px; color: var(--fg);
@@ -97,7 +103,7 @@ body.dragging, body.dragging * { user-select: none !important; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
-.tools { display: flex; gap: 5px; align-items: center; flex-shrink: 0; }
+.tools { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
 .tool-sep { width: 1px; height: 18px; background: var(--border); margin: 0 3px; }
 
 .tbtn {
