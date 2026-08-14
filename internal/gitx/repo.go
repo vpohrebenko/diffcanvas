@@ -99,11 +99,31 @@ func (w *limitedBuffer) Write(p []byte) (int, error) {
 // root commit. Asking git for it keeps this correct under sha256 repos, where
 // the well-known sha1 constant would be wrong.
 func (r *Repo) emptyTree(ctx context.Context) (string, error) {
-	out, err := r.run(ctx, "hash-object", "-t", "tree", "/dev/null")
+	// Hashing empty stdin rather than /dev/null: the device path does not
+	// exist on Windows, so a root commit failed there entirely.
+	out, err := r.runStdin(ctx, "", "hash-object", "-t", "tree", "--stdin")
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// runStdin is run with something fed to the command's standard input.
+func (r *Repo) runStdin(ctx context.Context, stdin string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", append(baseArgs, args...)...)
+	cmd.Dir = r.Root
+	cmd.Stdin = strings.NewReader(stdin)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &limitedBuffer{buf: &stdout, max: MaxOutput}
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, fmt.Errorf("git %s: %s", strings.Join(args, " "), msg)
+	}
+	return stdout.Bytes(), nil
 }
 
 // splitNUL splits NUL-delimited output, dropping the trailing empty field.

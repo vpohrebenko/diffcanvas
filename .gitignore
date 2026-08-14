@@ -6,6 +6,3 @@
 # Editor and OS noise
 .DS_Store
 *.swp
-
-# Internal handoff notes, not for publication
-HANDOFF.md

@@ -23,7 +23,7 @@ func newTestRepo(t *testing.T) *Repo {
 		cmd.Env = append(os.Environ(),
 			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@e",
 			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@e",
-			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+			"GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull,
 		)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
@@ -344,7 +344,7 @@ func TestPatchIsolatesRequestedFile(t *testing.T) {
 		cmd.Env = append(os.Environ(),
 			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@e",
 			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@e",
-			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+			"GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 		}
@@ -359,18 +359,27 @@ func TestPatchIsolatesRequestedFile(t *testing.T) {
 	git("init", "-q", "-b", "main")
 	git("config", "user.name", "t")
 	git("config", "user.email", "t@e")
-	// A glob-looking name, its neighbours, and a colon-prefixed name.
-	write("a*.txt", "one\n")
-	write("ab.txt", "one\n")
-	write("ac.txt", "one\n")
-	write(":weird.txt", "one\n")
+
+	// `*` and `:` are illegal in filenames on Windows and awkward on macOS,
+	// so the exotic names are attempted and dropped where the filesystem
+	// refuses them. The plain neighbours still prove the demultiplexing.
+	names := []string{"ab.txt", "ac.txt"}
+	for _, exotic := range []string{"a*.txt", ":weird.txt"} {
+		if os.WriteFile(filepath.Join(dir, exotic), []byte("one\n"), 0o644) == nil {
+			names = append(names, exotic)
+		} else {
+			t.Logf("filesystem rejects %q; skipping that case", exotic)
+		}
+	}
+	for _, n := range names {
+		write(n, "one\n")
+	}
 	git("add", "-A")
 	git("commit", "-qm", "base")
 
-	write("a*.txt", "GLOB-CHANGED\n")
-	write("ab.txt", "AB-CHANGED\n")
-	write("ac.txt", "AC-CHANGED\n")
-	write(":weird.txt", "WEIRD-CHANGED\n")
+	for _, n := range names {
+		write(n, strings.ToUpper(strings.NewReplacer("*", "GLOB", ":", "COLON", ".txt", "").Replace(n))+"-CHANGED\n")
+	}
 	git("add", "-A")
 	git("commit", "-qm", "edit all")
 
@@ -383,11 +392,9 @@ func TestPatchIsolatesRequestedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := map[string]string{
-		"a*.txt":     "GLOB-CHANGED",
-		"ab.txt":     "AB-CHANGED",
-		"ac.txt":     "AC-CHANGED",
-		":weird.txt": "WEIRD-CHANGED",
+	want := map[string]string{}
+	for _, n := range names {
+		want[n] = strings.ToUpper(strings.NewReplacer("*", "GLOB", ":", "COLON", ".txt", "").Replace(n)) + "-CHANGED"
 	}
 	for _, fc := range changes {
 		expect, ok := want[fc.Path]

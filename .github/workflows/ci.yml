@@ -14,20 +14,23 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        # go.mod pins a low minimum on purpose — the tool has to build on
+        # whatever Go a locked-down machine happens to have. 'stable' is here
+        # so a future release breaking us shows up before someone hits it.
+        go: ['1.22', 'stable']
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
-          check-latest: true
+          go-version: ${{ matrix.go }}
 
       # What matters is the shipped artifact: it must contain nothing that
       # needs vetting and must build without proxy access. Test-only and
       # tooling dependencies are fine — they never reach the binary.
       - name: Binary depends only on the standard library
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && matrix.go == 'stable'
         shell: bash
         run: |
           mod=$(go list -m)
@@ -43,7 +46,7 @@ jobs:
 
 
       - name: gofmt
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && matrix.go == 'stable'
         shell: bash
         run: |
           unformatted=$(gofmt -l ./cmd ./internal)
