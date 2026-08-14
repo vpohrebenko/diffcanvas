@@ -143,6 +143,7 @@ function buildCardDOM(card) {
       ev.stopPropagation();
       card.view = opt.value;
       card.rows = buildRows(card);
+      card.renderedView = effectiveView(card);
       layoutRows(card);
       syncViewButtons(card);
       onChange();
@@ -319,6 +320,7 @@ function applyData(card) {
   syncViewButtons(card);
 
   card.rows = buildRows(card);
+  card.renderedView = effectiveView(card);
   layoutRows(card);
 
   if (card.pendingLine) {
@@ -551,8 +553,45 @@ function rowTextBefore(row, node, offset) {
  * comparable between cards: a twelve-line tweak reads as a short stub beside a
  * file that was rewritten wholesale.
  */
+/** Columns mapped across the card's width in the texture view. */
+const TEXTURE_COLS = 90;
 const MAX_BANDS = 14;
 const BAND_PITCH = 16;
+
+/** Indentation and length of a rendered line, for the zoomed-out texture. */
+function metrics(segs) {
+  let text = '';
+  for (const s of segs || []) text += s.t;
+  const trimmed = text.replace(/^[ \t]+/, '');
+  let indent = text.length - trimmed.length;
+  // A tab reads as far wider than one column.
+  for (let i = 0; i < indent; i++) if (text[i] === '\t') indent += 3;
+  return { ind: indent, len: text.length };
+}
+
+/** The change kind of a row, for colouring: additions win over deletions. */
+function rowKind(r) {
+  if (r.kind === 'line' || r.kind === 'newline') {
+    if (r.t === '+' || r.added || r.changed) return 'add';
+    if (r.t === '-') return 'del';
+    return 'ctx';
+  }
+  if (r.kind === 'pair') {
+    if (r.r && r.r.t === '+') return 'add';
+    if (r.l && r.l.t === '-') return 'del';
+    return 'ctx';
+  }
+  return null;
+}
+
+function rowMetrics(r) {
+  if (r.m) return r.m;
+  let segs = null;
+  if (r.kind === 'line' || r.kind === 'newline') segs = r.segs;
+  else if (r.kind === 'pair') segs = (r.r || r.l || {}).segs;
+  r.m = segs ? metrics(segs) : { ind: 0, len: 0 };
+  return r.m;
+}
 
 /**
  * The zoomed-out view of a card.
@@ -576,7 +615,8 @@ function drawStrip(card) {
   ctx.fillRect(0, 0, w, h);
 
   const rows = card.rows;
-  if (!rows.length) return;
+  if (!rows.length || state.lodStyle === 'plain') return;
+  if (state.lodStyle === 'texture') return drawTexture(ctx, rows, w, h);
 
   const bands = Math.max(1, Math.min(MAX_BANDS, Math.floor(h / BAND_PITCH), rows.length));
   const bandH = Math.min(BAND_PITCH, h / bands);
@@ -624,6 +664,52 @@ function drawStrip(card) {
   }
 }
 
+/**
+ * The zoomed-out card as a code minimap.
+ *
+ * Each line is drawn as a bar spanning its indentation to its length, coloured
+ * by whether it was added, removed or untouched. Uniform bands told you how
+ * much changed but nothing about the code; this keeps the shape — nesting,
+ * blank lines, long lines, where a function begins — which is what makes a
+ * zoomed-out view worth looking at rather than just a bigger version of the
+ * counts already in the sidebar.
+ */
+const TEXTURE_COLORS = { add: '#3f8f52', del: '#b8463f', ctx: '#2f3945' };
+
+function drawTexture(ctx, rows, w, h) {
+  const pad = 8;
+  const usable = w - pad * 2;
+  const sx = usable / TEXTURE_COLS;
+
+  const bands = Math.max(1, Math.min(h, rows.length));
+  const bandH = h / bands;
+
+  for (let b = 0; b < bands; b++) {
+    const from = Math.floor((b * rows.length) / bands);
+    const to = Math.max(from + 1, Math.floor(((b + 1) * rows.length) / bands));
+
+    let kind = null;
+    let ind = Infinity;
+    let len = 0;
+    for (let i = from; i < to; i++) {
+      const k = rowKind(rows[i]);
+      if (!k) continue;
+      if (k === 'add' || (k === 'del' && kind !== 'add') || !kind) kind = k;
+      const m = rowMetrics(rows[i]);
+      if (m.len > 0) {
+        ind = Math.min(ind, m.ind);
+        len = Math.max(len, m.len);
+      }
+    }
+    if (!kind || len === 0) continue; // blank line or hunk header: leave a gap
+
+    const x0 = pad + Math.min(ind, TEXTURE_COLS) * sx;
+    const x1 = pad + Math.min(len, TEXTURE_COLS) * sx;
+    ctx.fillStyle = TEXTURE_COLORS[kind];
+    ctx.fillRect(x0, b * bandH, Math.max(1, x1 - x0), Math.max(1, bandH - (bandH > 2 ? 0.6 : 0)));
+  }
+}
+
 export function applyLOD() {
   const lod = state.scale < LOD_SCALE;
   for (const card of state.cards) {
@@ -665,12 +751,27 @@ function clearLODLabel(card) {
 }
 
 /** Rebuilds every card after a global unified/split switch. */
+/** Redraws every zoomed-out card, after the zoom style is changed. */
+export function redrawStrips() {
+  for (const card of state.cards) if (card.data) drawStrip(card);
+}
+
+/**
+ * Rebuilds the cards a global unified/split switch actually changes.
+ *
+ * Rebuilding every card was the reason the toolbar's Unified/Split felt
+ * unresponsive: a card pinned to its own view, or an added file resolving to
+ * 'new', is unaffected by the toggle, yet each one still had every row object
+ * rebuilt synchronously before the click could paint.
+ */
 export function rebuildAll() {
   for (const card of state.cards) {
     if (!card.data) continue;
+    syncViewButtons(card);
+    const next = effectiveView(card);
+    if (card.renderedView === next) continue;
     card.rows = buildRows(card);
     layoutRows(card);
-    syncViewButtons(card); // 'auto' cards follow the global toggle
   }
 }
 

@@ -5,6 +5,7 @@ import { state, el, toast, debounce, DRAG_TYPE } from './store.js';
 import { renderTree } from './tree.js';
 import {
   createCard, removeCard, setCardListener, applyLOD, rebuildAll, setCollapsed,
+  redrawStrips,
 } from './card.js';
 import {
   initArrows, renderArrows, loadArrows, toWorld, deleteSelectedArrow, linkImports,
@@ -268,6 +269,7 @@ function snapshot() {
     pan: state.pan,
     scale: state.scale,
     diffMode: state.diffMode,
+    lodStyle: state.lodStyle,
     viewed: [...state.viewed],
     cards: state.cards.map(c => ({
       path: c.path, x: c.x, y: c.y, w: c.w, h: c.h,
@@ -292,6 +294,7 @@ async function restoreLayout() {
   state.scale = saved.scale || 1;
   state.viewed = new Set(saved.viewed || []);
   if (saved.diffMode) setDiffMode(saved.diffMode, false);
+  if (saved.lodStyle) setLodStyle(saved.lodStyle, false);
 
   const remap = new Map();
   for (const c of saved.cards) {
@@ -379,12 +382,39 @@ function setupSearch() {
 
 function setDiffMode(mode, rebuild = true) {
   state.diffMode = mode;
+  // Paint the button state first; the rebuild can take a frame with several
+  // large cards open, and a button that looks dead invites a second click.
   document.getElementById('mode-unified').classList.toggle('active', mode === 'unified');
   document.getElementById('mode-split').classList.toggle('active', mode === 'split');
   if (rebuild) {
-    rebuildAll();
+    requestAnimationFrame(() => {
+      rebuildAll();
+      saveLayoutSoon();
+    });
+  }
+}
+
+const LOD_STYLES = [
+  { value: 'texture', label: 'shape', title: 'Code shape: indentation and line length, coloured by change' },
+  { value: 'bars', label: 'bars', title: 'How much changed, and roughly where' },
+  { value: 'plain', label: 'off', title: 'Name and counts only' },
+];
+
+function setLodStyle(value, redraw = true) {
+  state.lodStyle = value;
+  const opt = LOD_STYLES.find(o => o.value === value) || LOD_STYLES[0];
+  document.getElementById('btn-lod').textContent = `zoom: ${opt.label}`;
+  document.getElementById('btn-lod').title = opt.title;
+  if (redraw) {
+    redrawStrips();
     saveLayoutSoon();
   }
+}
+
+function cycleLodStyle() {
+  const i = LOD_STYLES.findIndex(o => o.value === state.lodStyle);
+  setLodStyle(LOD_STYLES[(i + 1) % LOD_STYLES.length].value);
+  toast(LOD_STYLES.find(o => o.value === state.lodStyle).title);
 }
 
 let allCollapsed = false;
@@ -400,6 +430,11 @@ function collapseAll() {
  * call site, so following a chain of calls leaves a visible trail.
  */
 async function jumpToDefinition(sourceCard, name, qual) {
+  // Acknowledge immediately. The first lookup builds the declaration index,
+  // which on a large repository takes long enough that silence reads as
+  // "nothing happened" and invites a second click.
+  toast(`resolving ${qual ? qual + '.' : ''}${name}…`);
+
   let res;
   try {
     res = await api.def(name, qual, sourceCard.path);
@@ -448,6 +483,7 @@ function setupToolbar() {
   document.getElementById('btn-fit').addEventListener('click', fit);
   document.getElementById('btn-layout').addEventListener('click', arrange);
   document.getElementById('btn-collapse').addEventListener('click', collapseAll);
+  document.getElementById('btn-lod').addEventListener('click', cycleLodStyle);
   document.getElementById('btn-clear').addEventListener('click', () => {
     if (state.cards.length && !confirm(`Remove all ${state.cards.length} cards?`)) return;
     for (const card of [...state.cards]) removeCard(card);
@@ -514,6 +550,7 @@ function setupKeys() {
       case 'u': setDiffMode('unified'); break;
       case 's': setDiffMode('split'); break;
       case 'i': drawImportArrows(); break;
+      case 'z': cycleLodStyle(); break;
       case '\\': document.body.classList.toggle('sidebar-hidden'); break;
     }
   });
@@ -537,6 +574,7 @@ async function main() {
   setupSearch();
   setupToolbar();
   setupKeys();
+  setLodStyle(state.lodStyle, false);
 
   try {
     state.meta = await api.meta();
@@ -559,6 +597,13 @@ async function main() {
 
   refreshChangeTree();
   applyTransform();
+
+  // Warm the Go declaration index in the background so the first ctrl-click is
+  // instant. Failure is irrelevant: it is a cache, and the real lookup rebuilds
+  // it if this never lands.
+  if (changes.some(c => c.path.endsWith('.go'))) {
+    setTimeout(() => { api.def('main', '', '').catch(() => {}); }, 1200);
+  }
 
   if (await restoreLayout()) {
     toast('restored your previous layout');

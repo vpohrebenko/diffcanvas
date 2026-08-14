@@ -11,6 +11,7 @@ export const state = {
   selection: new Set(),
   nextId: 1,
   diffMode: 'unified', // or 'split'
+  lodStyle: 'texture', // zoomed-out card: texture | bars | plain
   pan: { x: 60, y: 30 },
   scale: 1,
   selectedArrow: null,
