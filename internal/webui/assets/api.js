@@ -30,7 +30,7 @@ export const api = {
     if (!res.ok || body.error) throw new Error(body.error || `HTTP ${res.status}`);
     return body;
   },
-  def: (name, qual, from) => get('/api/def', { name, qual, from }),
+  def: (name, qual, from, line) => get('/api/def', { name, qual, from, line }),
   layout: () => get('/api/layout'),
 
   async saveLayout(layout) {

@@ -30,6 +30,9 @@ type Def struct {
 	Kind string `json:"kind"`           // func, method, type, var, const
 	Recv string `json:"recv,omitempty"` // receiver type, for methods
 	Pkg  string `json:"pkg,omitempty"`  // package name as declared
+	// Result type names, so a constructor call can be followed back to the
+	// type it produces.
+	Results []string `json:"-"`
 }
 
 // goModule is one go.mod found in the repository.
@@ -130,6 +133,13 @@ func (ix *Index) addFile(ctx context.Context, repo *gitx.Repo, rev, filePath str
 				Name: d.Name.Name, Path: filePath, Line: line(d.Pos()),
 				Kind: "func", Pkg: pkgName,
 			}
+			if d.Type != nil && d.Type.Results != nil {
+				for _, r := range d.Type.Results.List {
+					if n := typeName(r.Type); n != "" {
+						def.Results = append(def.Results, n)
+					}
+				}
+			}
 			if d.Recv != nil && len(d.Recv.List) > 0 {
 				def.Kind = "method"
 				def.Recv = receiverName(d.Recv.List[0].Type)
@@ -171,6 +181,25 @@ func (ix *Index) addFile(ctx context.Context, repo *gitx.Repo, rev, filePath str
 
 func (ix *Index) add(d Def) { ix.byName[d.Name] = append(ix.byName[d.Name], d) }
 
+// typeName reduces an expression like `*pkg.Foo[T]` to `Foo`.
+func typeName(expr ast.Expr) string {
+	switch t := expr.(type) {
+	case *ast.StarExpr:
+		return typeName(t.X)
+	case *ast.SelectorExpr:
+		return t.Sel.Name // pkg.Foo -> Foo
+	case *ast.IndexExpr:
+		return typeName(t.X)
+	case *ast.IndexListExpr:
+		return typeName(t.X)
+	case *ast.ArrayType:
+		return typeName(t.Elt)
+	case *ast.Ident:
+		return t.Name
+	}
+	return ""
+}
+
 // receiverName reduces `*Foo[T]` to `Foo`.
 func receiverName(expr ast.Expr) string {
 	switch t := expr.(type) {
@@ -182,6 +211,135 @@ func receiverName(expr ast.Expr) string {
 		return receiverName(t.X)
 	case *ast.Ident:
 		return t.Name
+	}
+	return ""
+}
+
+// inferLocalType works out the type of a local identifier at a given line.
+//
+// `req.Validate()` gives no clue which Validate is meant — every type tends to
+// have one — so resolving by method name alone returns a different answer each
+// time. Reading the declaration of `req` in the same file recovers the receiver
+// type for the cases that matter in practice: a method receiver, a function
+// parameter, a var declaration, a composite literal, and a constructor call
+// whose result type is known from the index.
+//
+// This is still not type checking: it does not follow fields, interfaces or
+// values from other packages. It returns "" when it cannot tell, and the
+// caller then offers a choice rather than pretending.
+func (ix *Index) inferLocalType(src, qual string, line int) string {
+	if src == "" || qual == "" || line <= 0 {
+		return ""
+	}
+	fset := token.NewFileSet()
+	file, _ := parser.ParseFile(fset, "", src, parser.SkipObjectResolution)
+	if file == nil {
+		return ""
+	}
+	lineOf := func(p token.Pos) int { return fset.Position(p).Line }
+
+	// The function containing the click; nearest declaration wins.
+	var fn *ast.FuncDecl
+	for _, d := range file.Decls {
+		f, ok := d.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		if lineOf(f.Pos()) <= line && line <= lineOf(f.End()) {
+			fn = f
+			break
+		}
+	}
+	if fn == nil {
+		return ""
+	}
+
+	// A method receiver.
+	if fn.Recv != nil {
+		for _, f := range fn.Recv.List {
+			for _, n := range f.Names {
+				if n.Name == qual {
+					return typeName(f.Type)
+				}
+			}
+		}
+	}
+	// Parameters and named results.
+	for _, list := range []*ast.FieldList{fn.Type.Params, fn.Type.Results} {
+		if list == nil {
+			continue
+		}
+		for _, f := range list.List {
+			for _, n := range f.Names {
+				if n.Name == qual {
+					return typeName(f.Type)
+				}
+			}
+		}
+	}
+
+	// Assignments and var declarations in the body, taking the last one
+	// before the click.
+	best := ""
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if n == nil || lineOf(n.Pos()) > line {
+			return true
+		}
+		switch stmt := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range stmt.Lhs {
+				id, ok := lhs.(*ast.Ident)
+				if !ok || id.Name != qual || i >= len(stmt.Rhs) {
+					continue
+				}
+				if t := ix.typeOfExpr(stmt.Rhs[i]); t != "" {
+					best = t
+				}
+			}
+		case *ast.ValueSpec:
+			for _, id := range stmt.Names {
+				if id.Name != qual {
+					continue
+				}
+				if stmt.Type != nil {
+					best = typeName(stmt.Type)
+				} else if len(stmt.Values) > 0 {
+					if t := ix.typeOfExpr(stmt.Values[0]); t != "" {
+						best = t
+					}
+				}
+			}
+		}
+		return true
+	})
+	return best
+}
+
+// typeOfExpr names the type an expression produces, where that is decidable
+// without a type checker.
+func (ix *Index) typeOfExpr(expr ast.Expr) string {
+	switch e := expr.(type) {
+	case *ast.CompositeLit:
+		return typeName(e.Type) // Foo{...}
+	case *ast.UnaryExpr:
+		return ix.typeOfExpr(e.X) // &Foo{...}
+	case *ast.CallExpr:
+		// A constructor: follow it to its declared result type.
+		var fname string
+		switch fn := e.Fun.(type) {
+		case *ast.Ident:
+			fname = fn.Name
+		case *ast.SelectorExpr:
+			fname = fn.Sel.Name
+		}
+		if fname == "" {
+			return ""
+		}
+		for _, d := range ix.byName[fname] {
+			if d.Kind == "func" && len(d.Results) > 0 {
+				return d.Results[0]
+			}
+		}
 	}
 	return ""
 }
@@ -202,7 +360,7 @@ type Result struct {
 //  2. An unqualified name declared in the calling file's own package.
 //  3. A unique declaration anywhere in the repository.
 //  4. Otherwise the best guess, with the alternatives returned alongside.
-func (ix *Index) Lookup(name, qual, fromPath string) (Result, error) {
+func (ix *Index) Lookup(name, qual, fromPath string, line int, src string) (Result, error) {
 	candidates := ix.byName[name]
 	if len(candidates) == 0 {
 		return Result{}, fmt.Errorf("no declaration of %q found", name)
@@ -244,20 +402,36 @@ func (ix *Index) Lookup(name, qual, fromPath string) (Result, error) {
 		}
 	}
 
-	// 3. Same package as the caller. For a qualified name this is wrong unless
-	// the qualifier was a variable (a method call), which is exactly the case
-	// go/types would be needed to settle.
+	// 3. The qualifier is a local variable: infer its type and take the method
+	// on that type. This is what makes `req.Validate()` land on the right
+	// Validate rather than on whichever one happened to sort first.
+	if qual != "" {
+		if recv := ix.inferLocalType(src, qual, line); recv != "" {
+			var onType []Def
+			for _, d := range candidates {
+				if d.Kind == "method" && d.Recv == recv {
+					onType = append(onType, d)
+				}
+			}
+			if len(onType) > 0 {
+				return result(onType, "receiver-type"), nil
+			}
+		}
+	}
+
+	// 4. Same package as the caller.
 	if hit := filterDir(candidates, fromDir); len(hit) > 0 {
-		// A method call on a local variable resolves to a method of that name.
 		if qual != "" {
 			if methods := filterKind(hit, "method"); len(methods) > 0 {
-				return result(methods, "same-package"), nil
+				// The type could not be inferred, so this is a name match
+				// among the caller's own package: plausible, not certain.
+				return result(methods, "guess"), nil
 			}
 		}
 		return result(hit, "same-package"), nil
 	}
 
-	// 4/5. Anywhere, preferring non-test declarations.
+	// 5. Anywhere, preferring non-test declarations.
 	preferred := preferNonTest(candidates)
 	confidence := "guess"
 	if len(preferred) == 1 {

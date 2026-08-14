@@ -215,7 +215,7 @@ function buildCardDOM(card) {
     window.dispatchEvent(new CustomEvent('dc:jump', {
       // Shift asks for a separate card: two call sites in one file are often
       // far apart, and reusing the card loses the one you came from.
-      detail: { card, name: found.name, qual: found.qual, separate: ev.shiftKey },
+      detail: { card, name: found.name, qual: found.qual, line: found.line, separate: ev.shiftKey },
     }));
   });
 
@@ -489,6 +489,7 @@ function renderRow(row) {
     : row.t === '-' ? 'row del'
     : row.changed ? 'row changed' : 'row';
   const node = el('div', cls);
+  if (row.new) node.dataset.line = String(row.new);
   node.append(
     el('span', 'gut', row.old ? String(row.old) : ''),
     el('span', 'gut', row.new ? String(row.new) : ''),
@@ -503,6 +504,7 @@ function renderRow(row) {
 
 function renderNewRow(row) {
   const node = el('div', row.added ? 'row changed' : 'row');
+  if (row.new) node.dataset.line = String(row.new);
   node.appendChild(el('span', 'gut', row.new ? String(row.new) : ''));
   const txt = el('span', 'txt');
   renderSegs(txt, row.segs);
@@ -542,6 +544,7 @@ function sideCell(line, which) {
   const kind = !line ? 'blank' : line.t === '-' ? 'del' : line.t === '+' ? 'add' : '';
   const cell = el('div', `side ${which} ${kind}`.trim());
   if (!line) return cell;
+  if (line.new) cell.dataset.line = String(line.new);
 
   const num = which === 'l' ? line.old : line.new;
   cell.append(el('span', 'gut', num ? String(num) : ''));
@@ -619,7 +622,10 @@ function identifierAt(clientX, clientY) {
     const match = before.match(/([A-Za-z0-9_]+)\s*\.\s*$/);
     if (match) qual = match[1];
   }
-  return { name, qual };
+  // The line number lets the server infer what a variable qualifier refers to.
+  const holder = node.parentElement?.closest('[data-line]');
+  const line = holder ? Number(holder.dataset.line) : 0;
+  return { name, qual, line };
 }
 
 /** Text of the row up to a given position inside one of its text nodes. */

@@ -528,7 +528,7 @@ function showCandidates(sourceCard, res, name, qual) {
   }, 0);
 }
 
-async function jumpToDefinition(sourceCard, name, qual, separate = false) {
+async function jumpToDefinition(sourceCard, name, qual, line = 0, separate = false) {
   // Acknowledge immediately. The first lookup builds the declaration index,
   // which on a large repository takes long enough that silence reads as
   // "nothing happened" and invites a second click.
@@ -536,7 +536,7 @@ async function jumpToDefinition(sourceCard, name, qual, separate = false) {
 
   let res;
   try {
-    res = await api.def(name, qual, sourceCard.path);
+    res = await api.def(name, qual, sourceCard.path, line);
   } catch (err) {
     toast(String(err.message || err));
     return;
@@ -550,6 +550,7 @@ async function jumpToDefinition(sourceCard, name, qual, separate = false) {
     'same-package': '',
     unique: '',
     'package-name': ' — matched by package name',
+    'receiver-type': '',
     guess: ` — best guess, ${(res.others || []).length} other candidate(s)`,
   }[res.confidence] ?? '';
 
@@ -736,7 +737,7 @@ function setupDebugOverlay() {
 async function main() {
   setCardListener(onGeometryChange);
   window.addEventListener('dc:jump', ev =>
-    jumpToDefinition(ev.detail.card, ev.detail.name, ev.detail.qual, ev.detail.separate));
+    jumpToDefinition(ev.detail.card, ev.detail.name, ev.detail.qual, ev.detail.line, ev.detail.separate));
 
   // Show the jump cursor while the modifier is held.
   const setJumpCursor = on => document.body.classList.toggle('jumping', on);

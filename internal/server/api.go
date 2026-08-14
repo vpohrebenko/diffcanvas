@@ -462,7 +462,20 @@ func (s *Server) handleDef(ctx context.Context, r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	res, err := index.Lookup(name, q.Get("qual"), q.Get("from"))
+	from := q.Get("from")
+	lineNo, _ := strconv.Atoi(q.Get("line"))
+
+	// The calling file is re-read so the qualifier's local declaration can be
+	// inspected; indexing every local variable in the repository up front
+	// would cost far more than parsing one file on demand.
+	src := ""
+	if from != "" {
+		if f, err := gitx.ReadFile(ctx, s.Repo, s.Spec.NewRev, from); err == nil && !f.Binary {
+			src = strings.Join(f.Lines, "\n")
+		}
+	}
+
+	res, err := index.Lookup(name, q.Get("qual"), from, lineNo, src)
 	if err != nil {
 		return nil, err
 	}

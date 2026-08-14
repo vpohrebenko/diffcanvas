@@ -69,7 +69,7 @@ func main() { store.New(); cache.New() }
 		"internal/cache/cache.go": "package cache\n\nfunc New() int { return 2 }\n",
 	})
 
-	got, err := ix.Lookup("New", "store", "main.go")
+	got, err := ix.Lookup("New", "store", "main.go", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func main() { store.New(); cache.New() }
 		t.Errorf("confidence = %q, want exact-package", got.Confidence)
 	}
 
-	got, err = ix.Lookup("New", "cache", "main.go")
+	got, err = ix.Lookup("New", "cache", "main.go", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func main() { st.New() }
 `,
 		"internal/store/store.go": "package store\n\nfunc New() int { return 1 }\n",
 	})
-	got, err := ix.Lookup("New", "st", "main.go")
+	got, err := ix.Lookup("New", "st", "main.go", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestUnqualifiedPrefersOwnPackage(t *testing.T) {
 		"internal/store/b.go":     "package store\n\nfunc use() { helper() }\n",
 		"internal/elsewhere/c.go": "package elsewhere\n\nfunc helper() {}\n",
 	})
-	got, err := ix.Lookup("helper", "", "internal/store/b.go")
+	got, err := ix.Lookup("helper", "", "internal/store/b.go", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func (s *Store) Add(n int) {}
 func use(s *Store) { s.Add(1) }
 `,
 	})
-	got, err := ix.Lookup("Add", "s", "internal/store/store.go")
+	got, err := ix.Lookup("Add", "s", "internal/store/store.go", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ var registry = map[string]int{}
 	for name, wantKind := range map[string]string{
 		"Widget": "type", "MaxWidgets": "const", "registry": "var",
 	} {
-		got, err := ix.Lookup(name, "", "a.go")
+		got, err := ix.Lookup(name, "", "a.go", 0, "")
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -187,7 +187,7 @@ func TestAmbiguityIsReported(t *testing.T) {
 		"b/b.go": "package b\n\nfunc Run() {}\n",
 		"c/c.go": "package c\n\nfunc caller() {}\n",
 	})
-	got, err := ix.Lookup("Run", "", "c/c.go")
+	got, err := ix.Lookup("Run", "", "c/c.go", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func main() { thing.New() }
 	})
 	// Falling through to a repo-wide guess would "resolve" thing.New to the
 	// unrelated local store.New, which is worse than reporting nothing.
-	got, err := ix.Lookup("New", "thing", "main.go")
+	got, err := ix.Lookup("New", "thing", "main.go", 0, "")
 	if err == nil {
 		t.Errorf("external qualifier resolved to %+v; want an error", got)
 	}
@@ -233,7 +233,7 @@ func main() { fmt.Print("x") }
 `,
 		"internal/tui/tui.go": "package tui\n\ntype W struct{}\n\nfunc (w *W) Print() {}\n",
 	})
-	if got, err := ix.Lookup("Print", "fmt", "main.go"); err == nil {
+	if got, err := ix.Lookup("Print", "fmt", "main.go", 0, ""); err == nil {
 		t.Errorf("fmt.Print resolved to %+v; want an error", got.Def)
 	}
 }
@@ -243,7 +243,7 @@ func TestUnknownNameErrors(t *testing.T) {
 		"go.mod": testModule,
 		"a.go":   "package main\n\nfunc main() {}\n",
 	})
-	if _, err := ix.Lookup("NoSuchThing", "", "a.go"); err == nil {
+	if _, err := ix.Lookup("NoSuchThing", "", "a.go", 0, ""); err == nil {
 		t.Error("expected an error for an unknown name")
 	}
 }
@@ -258,7 +258,7 @@ type Box[T any] struct{}
 func (b *Box[T]) Put(v T) {}
 `,
 	})
-	got, err := ix.Lookup("Put", "b", "a.go")
+	got, err := ix.Lookup("Put", "b", "a.go", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +285,7 @@ func main() { usecases.NewFilesInteractor() }
 		"tools/scratch/files.go": "package scratch\n\nfunc NewFilesInteractor() {}\n",
 	})
 
-	got, err := ix.Lookup("NewFilesInteractor", "usecases", "services/api/cmd/main.go")
+	got, err := ix.Lookup("NewFilesInteractor", "usecases", "services/api/cmd/main.go", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +311,7 @@ import "corp.example/root/sub/pkg"
 func main() { pkg.Do() }
 `,
 	})
-	got, err := ix.Lookup("Do", "pkg", "main.go")
+	got, err := ix.Lookup("Do", "pkg", "main.go", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func main() { usecases.NewFilesInteractor() }
 		"internal/usecases/files.go": "package usecases\n\nfunc NewFilesInteractor() {}\n",
 		"internal/other/files.go":    "package other\n\nfunc NewFilesInteractor() {}\n",
 	})
-	got, err := ix.Lookup("NewFilesInteractor", "usecases", "cmd/main.go")
+	got, err := ix.Lookup("NewFilesInteractor", "usecases", "cmd/main.go", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,5 +344,141 @@ func main() { usecases.NewFilesInteractor() }
 	}
 	if got.Confidence != "package-name" {
 		t.Errorf("confidence = %q, want package-name", got.Confidence)
+	}
+}
+
+// TestReceiverTypeInference is the case that made navigation unusable:
+// `x.Validate()` where x is a variable. Every type tends to have a Validate,
+// so resolving by method name alone lands on a different one each time.
+func TestReceiverTypeInference(t *testing.T) {
+	files := map[string]string{
+		"go.mod": testModule,
+		"a/types.go": `package a
+
+type Request struct{}
+
+func (r *Request) Validate() error { return nil }
+
+type Config struct{}
+
+func (c *Config) Validate() error { return nil }
+
+type Session struct{}
+
+func (s *Session) Validate() error { return nil }
+
+func NewSession() *Session { return &Session{} }
+`,
+		"a/use.go": `package a
+
+func handleParam(req *Request) {
+	req.Validate()
+}
+
+func handleLiteral() {
+	cfg := Config{}
+	cfg.Validate()
+}
+
+func handleConstructor() {
+	sess := NewSession()
+	sess.Validate()
+}
+
+func handleVarDecl() {
+	var cfg2 Config
+	cfg2.Validate()
+}
+`,
+	}
+	ix := buildIndex(t, files)
+	src := files["a/use.go"]
+
+	cases := []struct {
+		qual string
+		line int
+		want string
+	}{
+		{"req", 4, "Request"},   // function parameter
+		{"cfg", 9, "Config"},    // composite literal
+		{"sess", 14, "Session"}, // constructor result
+		{"cfg2", 19, "Config"},  // var declaration
+	}
+	for _, tc := range cases {
+		got, err := ix.Lookup("Validate", tc.qual, "a/use.go", tc.line, src)
+		if err != nil {
+			t.Errorf("%s: %v", tc.qual, err)
+			continue
+		}
+		if got.Def.Recv != tc.want {
+			t.Errorf("%s.Validate resolved to receiver %q, want %q",
+				tc.qual, got.Def.Recv, tc.want)
+		}
+		if got.Confidence != "receiver-type" {
+			t.Errorf("%s.Validate confidence = %q, want receiver-type", tc.qual, got.Confidence)
+		}
+	}
+}
+
+// TestMethodOnReceiverInsideMethod: the enclosing method's own receiver.
+func TestMethodOnReceiverInsideMethod(t *testing.T) {
+	files := map[string]string{
+		"go.mod": testModule,
+		"a/a.go": `package a
+
+type Server struct{}
+
+func (s *Server) Validate() error { return nil }
+
+type Other struct{}
+
+func (o *Other) Validate() error { return nil }
+
+func (s *Server) run() {
+	s.Validate()
+}
+`,
+	}
+	ix := buildIndex(t, files)
+	got, err := ix.Lookup("Validate", "s", "a/a.go", 12, files["a/a.go"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Def.Recv != "Server" {
+		t.Errorf("receiver = %q, want Server", got.Def.Recv)
+	}
+}
+
+// TestUninferableStaysHonest: when the type genuinely cannot be worked out,
+// the result must be marked a guess so the UI offers a choice.
+func TestUninferableStaysHonest(t *testing.T) {
+	files := map[string]string{
+		"go.mod": testModule,
+		"a/a.go": `package a
+
+type A struct{}
+
+func (a *A) Validate() error { return nil }
+
+type B struct{}
+
+func (b *B) Validate() error { return nil }
+
+func run(things map[string]interface{}) {
+	x := things["k"]
+	x.Validate()
+}
+`,
+	}
+	ix := buildIndex(t, files)
+	got, err := ix.Lookup("Validate", "x", "a/a.go", 13, files["a/a.go"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Confidence == "receiver-type" {
+		t.Errorf("claimed a receiver type it cannot know: %+v", got)
+	}
+	if !got.Ambiguous {
+		t.Errorf("expected alternatives to be offered, got %+v", got)
 	}
 }
