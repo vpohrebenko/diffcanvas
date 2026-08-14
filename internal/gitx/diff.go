@@ -167,7 +167,7 @@ type Line struct {
 // needs no path parsing at all: everything before the first @@ is discarded.
 // That sidesteps the quoting and rename-header edge cases that make generic
 // `diff --git` header parsing fragile.
-func Patch(ctx context.Context, r *Repo, spec *Spec, fc *FileChange, contextLines int) ([]Hunk, error) {
+func Patch(ctx context.Context, r *Repo, spec *Spec, fc *FileChange, contextLines int) ([]Hunk, bool, error) {
 	if contextLines < 0 {
 		contextLines = 3
 	}
@@ -186,9 +186,12 @@ func Patch(ctx context.Context, r *Repo, spec *Spec, fc *FileChange, contextLine
 
 	out, err := r.run(ctx, args...)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return parseHunks(string(out), fc.Path), nil
+	hunks := parseHunks(string(out), fc.Path)
+	// A patch at the cap was cut mid-stream, so the tail of the file is
+	// missing and the card must say so rather than look complete.
+	return hunks, len(out) >= MaxOutput, nil
 }
 
 // literalPathspec disables git's pathspec magic for a path that came from the

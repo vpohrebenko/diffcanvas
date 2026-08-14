@@ -48,9 +48,11 @@ func ReadFile(ctx context.Context, r *Repo, rev, path string) (*File, error) {
 		}
 		data = b
 	case RevIndex:
-		data = r.runAllowFail(ctx, "show", ":./"+path)
+		data = r.runAllowFail(ctx, "cat-file", "blob", ":./"+path)
 	default:
-		data = r.runAllowFail(ctx, "show", rev+":./"+path)
+		// cat-file blob, not show: `show <rev>:<dir>` prints a tree listing,
+		// which was then rendered as though it were the file's contents.
+		data = r.runAllowFail(ctx, "cat-file", "blob", rev+":./"+path)
 	}
 
 	f := &File{Path: path, Rev: rev}

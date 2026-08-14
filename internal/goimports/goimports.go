@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/vpohrebenko/diffcanvas/internal/gitx"
+	"github.com/vpohrebenko/diffcanvas/internal/gomod"
 )
 
 // Edge is a directed dependency from one file to another.
@@ -28,9 +29,12 @@ type Edge struct {
 // arrows that can be drawn between cards already on the canvas. Drawing edges
 // to files that are not open would produce nothing useful.
 func Edges(ctx context.Context, repo *gitx.Repo, rev string, paths []string) ([]Edge, error) {
-	module, err := modulePath(ctx, repo, rev)
-	if err != nil || module == "" {
-		return []Edge{}, nil // not a module: nothing to resolve against
+	// Every go.mod that could govern these files, not just one at the root.
+	// Assuming a single root module meant this returned nothing at all for a
+	// repository whose module lives in a subdirectory — no error, no arrows.
+	modules := gomod.Find(ctx, repo, rev, gomod.Candidates(paths))
+	if len(modules) == 0 {
+		return []Edge{}, nil
 	}
 
 	// Group the candidate files by the directory they live in, since a Go
@@ -55,12 +59,9 @@ func Edges(ctx context.Context, repo *gitx.Repo, rev string, paths []string) ([]
 			continue // unparseable file: skip rather than fail the request
 		}
 		for _, imp := range imports {
-			if imp != module && !strings.HasPrefix(imp, module+"/") {
+			dir, internal := modules.Dir(imp)
+			if !internal {
 				continue // external dependency
-			}
-			dir := strings.TrimPrefix(strings.TrimPrefix(imp, module), "/")
-			if dir == "" {
-				dir = "."
 			}
 			// One edge per imported package, not one per file in it. An import
 			// names a directory, so fanning out to every open file there
@@ -148,19 +149,4 @@ func importsOf(ctx context.Context, repo *gitx.Repo, rev, file string) ([]string
 		out = append(out, strings.Trim(spec.Path.Value, `"`))
 	}
 	return out, nil
-}
-
-// modulePath reads the module line from go.mod.
-func modulePath(ctx context.Context, repo *gitx.Repo, rev string) (string, error) {
-	f, err := gitx.ReadFile(ctx, repo, rev, "go.mod")
-	if err != nil {
-		return "", err
-	}
-	for _, line := range f.Lines {
-		line = strings.TrimSpace(line)
-		if rest, ok := strings.CutPrefix(line, "module"); ok {
-			return strings.TrimSpace(strings.Trim(strings.TrimSpace(rest), `"`)), nil
-		}
-	}
-	return "", nil
 }

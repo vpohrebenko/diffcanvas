@@ -56,13 +56,27 @@ function applyTransform() {
   drawMinimap();
 }
 
+/**
+ * Something moved: cheap, and safe to run on every pointer frame.
+ */
 function onGeometryChange() {
   renderArrows();
   drawMinimap();
+  saveLayoutSoon();
+}
+
+/**
+ * The set of cards changed: also refreshes the sidebar and the empty state.
+ *
+ * Kept apart because refreshTreeMarks walks every row in the sidebar — 1,600
+ * of them on a large review — and was running on every pointermove of a drag
+ * to update something that only changes when a card opens or closes.
+ */
+function onCardsChanged() {
+  onGeometryChange();
   emptyState.style.display = state.cards.length ? 'none' : 'grid';
   refreshTreeMarks();
   syncSelectionBar();
-  saveLayoutSoon();
 }
 
 function refreshTreeMarks() {
@@ -148,7 +162,7 @@ canvas.addEventListener('drop', ev => {
   if (!path) return;
   ev.preventDefault();
   const p = toWorld(ev.clientX, ev.clientY);
-  createCard(path, { x: p.x, y: p.y });
+  openFile(path, { x: p.x, y: p.y });
 });
 
 // ── placement ────────────────────────────────────────────────────────────
@@ -162,7 +176,10 @@ function nextSpot() {
 
 function openFile(path, opts = {}) {
   const spot = opts.x !== undefined ? {} : nextSpot();
-  return createCard(path, { ...spot, ...opts });
+  const card = createCard(path, { ...spot, ...opts });
+  applyLOD(); // a card created while zoomed out otherwise renders as text
+  onCardsChanged();
+  return card;
 }
 
 /** True when the event asks for a separate card rather than reusing one. */
@@ -286,14 +303,19 @@ minimap.addEventListener('click', ev => {
 
 // ── layout persistence ───────────────────────────────────────────────────
 
+/** Bumped when the layout shape changes incompatibly. */
+const LAYOUT_VERSION = 1;
+
 function snapshot() {
   return {
+    v: LAYOUT_VERSION,
     pan: state.pan,
     scale: state.scale,
     diffMode: state.diffMode,
     lodStyle: state.lodStyle,
     fontScale: state.fontScale,
     viewed: [...state.viewed],
+    treeCollapsed: [...state.treeCollapsed],
     cards: state.cards.map(c => ({
       path: c.path, x: c.x, y: c.y, w: c.w, h: c.h,
       collapsed: c.collapsed, context: c.context, view: c.view,
@@ -312,17 +334,25 @@ async function restoreLayout() {
   try {
     saved = (await api.layout()).layout;
   } catch { /* a missing layout is not worth surfacing */ }
-  if (!saved || !saved.cards?.length) return false;
+  if (!saved) return false;
+  // A layout from a build with a different shape is discarded rather than
+  // partially applied; it costs one arrangement, not a confusing half-restore.
+  if ((saved.v || 0) !== LAYOUT_VERSION) return false;
 
+  // Settings are restored even with no cards. Closing the last card wrote
+  // `cards: []`, and bailing here threw away the reviewed-file marks — the one
+  // piece of state that cannot be reconstructed — along with the zoom style
+  // and font size.
   state.pan = saved.pan || state.pan;
   state.scale = saved.scale || 1;
   state.viewed = new Set(saved.viewed || []);
+  state.treeCollapsed = new Set(saved.treeCollapsed || []);
   if (saved.diffMode) setDiffMode(saved.diffMode, false);
   if (saved.lodStyle) setLodStyle(saved.lodStyle, false);
   if (saved.fontScale) setFontScale(saved.fontScale, false);
 
   const remap = new Map();
-  for (const c of saved.cards) {
+  for (const c of saved.cards || []) {
     const card = createCard(c.path, {
       x: c.x, y: c.y, w: c.w, h: c.h, context: c.context ?? 3,
       view: c.view ?? 'auto', fontScale: c.fontScale || 0, duplicate: true,
@@ -336,7 +366,7 @@ async function restoreLayout() {
 
   applyTransform();
   onGeometryChange();
-  return true;
+  return (saved.cards || []).length > 0;
 }
 
 // ── panes ────────────────────────────────────────────────────────────────
@@ -636,7 +666,7 @@ function setupToolbar() {
     if (state.cards.length && !confirm(`Remove all ${state.cards.length} cards?`)) return;
     for (const card of [...state.cards]) removeCard(card);
     state.arrows = [];
-    onGeometryChange();
+    onCardsChanged();
   });
 
   document.getElementById('btn-sidebar').addEventListener('click', () => {
@@ -652,12 +682,16 @@ function setupToolbar() {
   });
   document.getElementById('sel-close').addEventListener('click', () => {
     for (const c of selectedCards()) removeCard(c);
-    onGeometryChange();
+    onCardsChanged();
   });
 
   document.getElementById('filter').addEventListener('input', refreshChangeTree);
   document.getElementById('file-filter').addEventListener('input', refreshFileTree);
-  window.addEventListener('dc:tree-refresh', () => { refreshChangeTree(); refreshFileTree(); });
+  window.addEventListener('dc:tree-refresh', () => {
+    refreshChangeTree();
+    refreshFileTree();
+    saveLayoutSoon(); // directory collapse is part of the arrangement
+  });
 }
 
 function setupKeys() {
@@ -684,7 +718,7 @@ function setupKeys() {
       if (cards.length) {
         ev.preventDefault();
         for (const c of cards) removeCard(c);
-        onGeometryChange();
+        onCardsChanged();
       }
       return;
     }
@@ -777,7 +811,7 @@ function setupDebugOverlay() {
 // ── start ────────────────────────────────────────────────────────────────
 
 async function main() {
-  setCardListener(onGeometryChange);
+  setCardListener(onGeometryChange, onCardsChanged);
   window.addEventListener('dc:jump', ev =>
     jumpToDefinition(ev.detail.card, ev.detail.name, ev.detail.qual, ev.detail.line, ev.detail.separate));
 
@@ -826,14 +860,12 @@ async function main() {
     setTimeout(() => { api.def('main', '', '').catch(() => {}); }, 1200);
   }
 
-  if (await restoreLayout()) {
-    toast('restored your previous layout');
-    // restoreLayout repopulates state.viewed, and only a full rebuild renders
-    // the reviewed strikethroughs.
-    refreshChangeTree();
-  }
+  if (await restoreLayout()) toast('restored your previous layout');
+  // restoreLayout repopulates state.viewed, and only a full rebuild renders
+  // the reviewed strikethroughs.
+  refreshChangeTree();
   refreshSelection();
-  onGeometryChange();
+  onCardsChanged();
 }
 
 main().catch(err => {

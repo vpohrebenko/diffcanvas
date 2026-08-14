@@ -9,6 +9,8 @@ export const state = {
   arrows: [],
   viewed: new Set(),
   selection: new Set(),
+  treeCollapsed: new Set(), // collapsed directories in the sidebar
+  lastCard: null,          // last card touched, for keyboard actions
   nextId: 1,
   diffMode: 'unified', // or 'split'
   lodStyle: 'text',    // zoomed-out card: text | texture | bars | plain

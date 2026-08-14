@@ -83,8 +83,8 @@ func (s *Server) handleChanges(ctx context.Context, r *http.Request) (any, error
 	return map[string]any{"changes": changes}, nil
 }
 
-// maxWordDiffPairs bounds the intra-line comparison per file. Each pair costs
-// an O(n*m) table, so a machine-generated file with thousands of similar
+// maxWordDiffPairs bounds the intra-line comparison for one file. Each pair
+// costs an O(n*m) table, so a machine-generated file with thousands of
 // replaced lines otherwise dominates the whole request.
 const maxWordDiffPairs = 3000
 
@@ -171,15 +171,17 @@ func (s *Server) diffFileView(ctx context.Context, fc *gitx.FileChange, contextL
 		return view, nil
 	}
 
-	hunks, err := gitx.Patch(ctx, s.Repo, s.Spec, fc, contextLines)
+	hunks, truncated, err := gitx.Patch(ctx, s.Repo, s.Spec, fc, contextLines)
 	if err != nil {
 		return nil, err
 	}
+	view.Trunc = truncated
 
 	oldSegs := s.highlightSide(ctx, s.Spec.OldRev, oldPathOf(fc), fc.Path)
 	newSegs := s.highlightSide(ctx, s.Spec.NewRev, fc.Path, fc.Path)
 
 	view.Hunks = make([]HunkView, 0, len(hunks))
+	budget := maxWordDiffPairs // spent across the whole file, not per hunk
 	for _, h := range hunks {
 		hv := HunkView{Header: h.Header, OldStart: h.OldStart, NewStart: h.NewStart}
 		hv.Lines = make([]LineView, 0, len(h.Lines))
@@ -194,7 +196,7 @@ func (s *Server) diffFileView(ctx context.Context, fc *gitx.FileChange, contextL
 			hv.Lines = append(hv.Lines, lv)
 		}
 		hv.Pairs = pairsOf(h.Lines)
-		markWords(hv.Lines, hv.Pairs, h.Lines)
+		budget = markWords(hv.Lines, hv.Pairs, h.Lines, budget)
 		view.Hunks = append(view.Hunks, hv)
 	}
 	return view, nil
@@ -222,11 +224,10 @@ func pairsOf(lines []gitx.Line) [][2]int {
 
 // markWords flags the segments inside each replaced line that actually
 // changed, so a one-word edit no longer reads as two rewritten lines.
-func markWords(views []LineView, pairs [][2]int, raw []gitx.Line) {
-	budget := maxWordDiffPairs
+func markWords(views []LineView, pairs [][2]int, raw []gitx.Line, budget int) int {
 	for _, p := range pairs {
 		if budget <= 0 {
-			return // huge rewrite: line-level colour is enough
+			return 0 // huge rewrite: line-level colour is enough
 		}
 		oldIdx, newIdx := p[0], p[1]
 		if oldIdx < 0 || newIdx < 0 || oldIdx == newIdx {
@@ -235,14 +236,18 @@ func markWords(views []LineView, pairs [][2]int, raw []gitx.Line) {
 		if raw[oldIdx].T != "-" || raw[newIdx].T != "+" {
 			continue
 		}
+		// Charged before the result is known: a comparison that comes back
+		// "too dissimilar" still built the whole O(n*m) table, and only
+		// charging successes left the real work unbounded.
+		budget--
 		oldMarks, newMarks, ok := diffx.Compare(raw[oldIdx].C, raw[newIdx].C)
 		if !ok {
 			continue // too dissimilar to align; leave the whole line marked
 		}
-		budget--
 		views[oldIdx].Segs = splitOnMarks(views[oldIdx].Segs, oldMarks)
 		views[newIdx].Segs = splitOnMarks(views[newIdx].Segs, newMarks)
 	}
+	return budget
 }
 
 // splitOnMarks cuts highlighted segments at the word-diff boundaries and flags
@@ -264,7 +269,9 @@ func splitOnMarks(segs []highlight.Segment, marks []diffx.Mark) []highlight.Segm
 		cursor := start
 
 		for _, m := range marks {
-			if m.End <= cursor || m.Start >= end {
+			// Marks arrive sorted and disjoint from diffx; clamping here means
+			// a future caller that breaks that cannot slice out of range.
+			if m.End <= cursor || m.Start >= end || m.Start < 0 || m.End > offset {
 				continue
 			}
 			if m.Start > cursor {
@@ -285,6 +292,7 @@ func splitOnMarks(segs []highlight.Segment, marks []diffx.Mark) []highlight.Segm
 // fullFileView returns a whole file, optionally annotating which lines the
 // change set added so the diff is still visible in full context.
 func (s *Server) fullFileView(ctx context.Context, path string, fc *gitx.FileChange, contextLines int) (*FileView, error) {
+	requested := path
 	rev := s.Spec.NewRev
 	status := "unchanged"
 	if fc != nil {
@@ -302,7 +310,9 @@ func (s *Server) fullFileView(ctx context.Context, path string, fc *gitx.FileCha
 	}
 
 	view := &FileView{
-		Path: path, Status: status, Lang: highlight.Detect(path), Mode: "full",
+		// The requested path, not the old one a deletion was read from: the
+		// client keys its cards on what it asked for.
+		Path: requested, Status: status, Lang: highlight.Detect(path), Mode: "full",
 		Binary: file.Binary, Trunc: file.Trunc, Context: contextLines,
 	}
 	if fc != nil {
@@ -320,7 +330,7 @@ func (s *Server) fullFileView(ctx context.Context, path string, fc *gitx.FileCha
 
 	// Mark added lines so a full-file card still shows where the change is.
 	if fc != nil && !fc.Binary && fc.Status != "deleted" {
-		if hunks, err := gitx.Patch(ctx, s.Repo, s.Spec, fc, 0); err == nil {
+		if hunks, _, err := gitx.Patch(ctx, s.Repo, s.Spec, fc, 0); err == nil {
 			for _, h := range hunks {
 				for _, l := range h.Lines {
 					if l.T == "+" {

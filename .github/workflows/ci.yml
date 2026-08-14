@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # The tool shells out to git and its tests build throwaway repositories,
+    # so git must be present — it is, on all GitHub runners.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          check-latest: true
+
+      # What matters is the shipped artifact: it must contain nothing that
+      # needs vetting and must build without proxy access. Test-only and
+      # tooling dependencies are fine — they never reach the binary.
+      - name: Binary depends only on the standard library
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          mod=$(go list -m)
+          external=$(go list -deps ./cmd/diffcanvas \
+            | grep -E '^[^/]+\.[^/]+/' \
+            | grep -v "^$mod\(/\|$\)" || true)
+          if [ -n "$external" ]; then
+            echo "the binary pulls in non-stdlib packages:" >&2
+            echo "$external" >&2
+            exit 1
+          fi
+          echo "binary is stdlib-only"
+
+
+      - name: gofmt
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l ./cmd ./internal)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+  build:
+    # Cross-compilation is the distribution story: build once, copy one binary.
+    # Breaking a target should fail here rather than when it is needed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Cross-compile
+        run: |
+          for target in linux/amd64 linux/arm64 windows/amd64 darwin/arm64; do
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 \
+              go build -trimpath -ldflags="-s -w" -o /dev/null ./cmd/diffcanvas
+            echo "ok $target"
+          done

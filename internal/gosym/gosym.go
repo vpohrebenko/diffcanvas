@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/vpohrebenko/diffcanvas/internal/gitx"
+	"github.com/vpohrebenko/diffcanvas/internal/gomod"
 )
 
 // Def is one declaration.
@@ -35,23 +36,14 @@ type Def struct {
 	Results []string `json:"-"`
 }
 
-// goModule is one go.mod found in the repository.
-type goModule struct {
-	dir  string // repo-relative directory holding go.mod ("" at the root)
-	path string // the module path it declares
-}
-
 // Index holds every declaration in the repository at one revision.
 type Index struct {
 	byName map[string][]Def
 	// imports maps a file to the import paths of its qualifiers, so `util.X`
 	// in one file and `util.X` in another can resolve to different packages.
 	imports map[string]map[string]string
-	// Every module in the repository, not just one at the root: a repository
-	// with go.mod in a subdirectory, or several modules, is normal, and
-	// assuming a single root module made every qualified lookup fall through
-	// to a repository-wide guess.
-	modules []goModule
+	// Every module in the repository, not just one at the root.
+	modules gomod.Set
 }
 
 // maxIndexFiles bounds the work for very large repositories.
@@ -67,7 +59,7 @@ func Build(ctx context.Context, repo *gitx.Repo, rev string) (*Index, error) {
 	ix := &Index{
 		byName:  make(map[string][]Def),
 		imports: make(map[string]map[string]string),
-		modules: findModules(ctx, repo, rev, paths),
+		modules: gomod.Find(ctx, repo, rev, paths),
 	}
 
 	seen := 0
@@ -227,7 +219,7 @@ func receiverName(expr ast.Expr) string {
 // This is still not type checking: it does not follow fields, interfaces or
 // values from other packages. It returns "" when it cannot tell, and the
 // caller then offers a choice rather than pretending.
-func (ix *Index) inferLocalType(src, qual string, line int) string {
+func (ix *Index) inferLocalType(src, qual string, line int, fromDir string) string {
 	if src == "" || qual == "" || line <= 0 {
 		return ""
 	}
@@ -278,6 +270,12 @@ func (ix *Index) inferLocalType(src, qual string, line int) string {
 		}
 	}
 
+	// A declaration with no body — assembly-backed, cgo, //go:linkname — is
+	// valid Go and parses to a nil Body, which ast.Inspect dereferences.
+	if fn.Body == nil {
+		return ""
+	}
+
 	// Assignments and var declarations in the body, taking the last one
 	// before the click.
 	best := ""
@@ -292,7 +290,7 @@ func (ix *Index) inferLocalType(src, qual string, line int) string {
 				if !ok || id.Name != qual || i >= len(stmt.Rhs) {
 					continue
 				}
-				if t := ix.typeOfExpr(stmt.Rhs[i]); t != "" {
+				if t := ix.typeOfExpr(stmt.Rhs[i], fromDir); t != "" {
 					best = t
 				}
 			}
@@ -304,7 +302,7 @@ func (ix *Index) inferLocalType(src, qual string, line int) string {
 				if stmt.Type != nil {
 					best = typeName(stmt.Type)
 				} else if len(stmt.Values) > 0 {
-					if t := ix.typeOfExpr(stmt.Values[0]); t != "" {
+					if t := ix.typeOfExpr(stmt.Values[0], fromDir); t != "" {
 						best = t
 					}
 				}
@@ -317,26 +315,24 @@ func (ix *Index) inferLocalType(src, qual string, line int) string {
 
 // typeOfExpr names the type an expression produces, where that is decidable
 // without a type checker.
-func (ix *Index) typeOfExpr(expr ast.Expr) string {
+func (ix *Index) typeOfExpr(expr ast.Expr, fromDir string) string {
 	switch e := expr.(type) {
 	case *ast.CompositeLit:
 		return typeName(e.Type) // Foo{...}
 	case *ast.UnaryExpr:
-		return ix.typeOfExpr(e.X) // &Foo{...}
+		return ix.typeOfExpr(e.X, fromDir) // &Foo{...}
 	case *ast.CallExpr:
-		// A constructor: follow it to its declared result type.
-		var fname string
-		switch fn := e.Fun.(type) {
-		case *ast.Ident:
-			fname = fn.Name
-		case *ast.SelectorExpr:
-			fname = fn.Sel.Name
-		}
-		if fname == "" {
+		// A constructor: follow it to its declared result type. Only an
+		// unqualified call in the caller's own package can be resolved this
+		// way — matching a bare name across the repository picked whichever
+		// New() sorted first and then reported the wrong type as certain,
+		// which was worse than not inferring at all.
+		id, ok := e.Fun.(*ast.Ident)
+		if !ok || fromDir == "" {
 			return ""
 		}
-		for _, d := range ix.byName[fname] {
-			if d.Kind == "func" && len(d.Results) > 0 {
+		for _, d := range ix.byName[id.Name] {
+			if d.Kind == "func" && len(d.Results) > 0 && path.Dir(d.Path) == fromDir {
 				return d.Results[0]
 			}
 		}
@@ -371,11 +367,17 @@ func (ix *Index) Lookup(name, qual, fromPath string, line int, src string) (Resu
 	// 1. Qualified by a real import of this file.
 	if qual != "" {
 		if importPath, ok := ix.imports[fromPath][qual]; ok {
-			dir, internal := ix.dirOf(importPath)
+			dir, internal := ix.modules.Dir(importPath)
 			if internal {
 				if hit := filterDir(candidates, dir); len(hit) > 0 {
 					return result(hit, "exact-package"), nil
 				}
+				// The package is in this repository and does not declare the
+				// name. Falling through used to hand back an unrelated
+				// declaration labelled "unique", i.e. a wrong answer presented
+				// as fact.
+				return Result{}, fmt.Errorf("%s.%s: package %s does not declare %s",
+					qual, name, importPath, name)
 			} else if len(filterPkg(candidates, qual)) == 0 {
 				// The qualifier names an import outside this repository — the
 				// standard library or a dependency — and nothing here declares
@@ -406,7 +408,7 @@ func (ix *Index) Lookup(name, qual, fromPath string, line int, src string) (Resu
 	// on that type. This is what makes `req.Validate()` land on the right
 	// Validate rather than on whichever one happened to sort first.
 	if qual != "" {
-		if recv := ix.inferLocalType(src, qual, line); recv != "" {
+		if recv := ix.inferLocalType(src, qual, line, fromDir); recv != "" {
 			var onType []Def
 			for _, d := range candidates {
 				if d.Kind == "method" && d.Recv == recv {
@@ -438,65 +440,6 @@ func (ix *Index) Lookup(name, qual, fromPath string, line int, src string) (Resu
 		confidence = "unique"
 	}
 	return result(preferred, confidence), nil
-}
-
-// dirOf maps an import path to a repository directory, using the most
-// specific module that claims it. Longest match wins, so a nested module
-// beats its parent.
-func (ix *Index) dirOf(importPath string) (string, bool) {
-	best := -1
-	for i, m := range ix.modules {
-		if m.path == "" {
-			continue
-		}
-		if importPath != m.path && !strings.HasPrefix(importPath, m.path+"/") {
-			continue
-		}
-		if best < 0 || len(m.path) > len(ix.modules[best].path) {
-			best = i
-		}
-	}
-	if best < 0 {
-		return "", false // external dependency, not in this repository
-	}
-	m := ix.modules[best]
-	sub := strings.TrimPrefix(strings.TrimPrefix(importPath, m.path), "/")
-	dir := path.Join(m.dir, sub)
-	if dir == "" {
-		dir = "."
-	}
-	return dir, true
-}
-
-// findModules locates every go.mod in the repository.
-func findModules(ctx context.Context, repo *gitx.Repo, rev string, paths []string) []goModule {
-	var out []goModule
-	for _, p := range paths {
-		if path.Base(p) != "go.mod" {
-			continue
-		}
-		f, err := gitx.ReadFile(ctx, repo, rev, p)
-		if err != nil {
-			continue
-		}
-		for _, line := range f.Lines {
-			rest, ok := strings.CutPrefix(strings.TrimSpace(line), "module")
-			if !ok {
-				continue
-			}
-			mp := strings.TrimSpace(strings.Trim(strings.TrimSpace(rest), `"`))
-			if mp == "" {
-				break
-			}
-			dir := path.Dir(p)
-			if dir == "." {
-				dir = ""
-			}
-			out = append(out, goModule{dir: dir, path: mp})
-			break
-		}
-	}
-	return out
 }
 
 func filterDir(defs []Def, dir string) []Def {
@@ -564,18 +507,4 @@ func result(defs []Def, confidence string) Result {
 		}
 	}
 	return res
-}
-
-// modulePath reads the root go.mod, for callers that only need the main one.
-func modulePath(ctx context.Context, repo *gitx.Repo, rev string) string {
-	f, err := gitx.ReadFile(ctx, repo, rev, "go.mod")
-	if err != nil {
-		return ""
-	}
-	for _, line := range f.Lines {
-		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "module"); ok {
-			return strings.TrimSpace(strings.Trim(strings.TrimSpace(rest), `"`))
-		}
-	}
-	return ""
 }

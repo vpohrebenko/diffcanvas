@@ -168,3 +168,29 @@ func TestUnparseableFileIsSkipped(t *testing.T) {
 		t.Errorf("a broken sibling should not suppress valid edges; got %+v", edges)
 	}
 }
+
+// TestNestedModuleEdges: the import-arrow feature returned nothing at all for
+// a repository whose go.mod lives in a subdirectory — no error, no arrows —
+// because it assumed a single module at the root.
+func TestNestedModuleEdges(t *testing.T) {
+	repo := newRepo(t, map[string]string{
+		"services/api/go.mod": "module corp.example/api\n",
+		"services/api/cmd/main.go": `package main
+
+import "corp.example/api/internal/store"
+
+func main() { store.New() }
+`,
+		"services/api/internal/store/store.go": "package store\n\nfunc New() {}\n",
+	})
+	edges, err := Edges(context.Background(), repo, gitx.RevWorktree, []string{
+		"services/api/cmd/main.go",
+		"services/api/internal/store/store.go",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has(edges, "services/api/cmd/main.go", "services/api/internal/store/store.go") {
+		t.Errorf("no edge found in a nested-module repository; got %+v", edges)
+	}
+}

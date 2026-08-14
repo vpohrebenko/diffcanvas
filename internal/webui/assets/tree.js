@@ -5,7 +5,6 @@
 
 import { state, el, DRAG_TYPE } from './store.js';
 
-const collapsed = new Set();
 
 /** Builds a nested node tree from flat paths. */
 function buildTree(entries) {
@@ -109,7 +108,7 @@ export function renderTree(container, entries, filterText, onOpen) {
 }
 
 function renderNode(parent, node, depth, forceOpen, onOpen) {
-  const isOpen = forceOpen || !collapsed.has(node.path);
+  const isOpen = forceOpen || !state.treeCollapsed.has(node.path);
   const row = el('div', node.isDir ? 'node dir' : 'node file');
   row.style.paddingLeft = `${4 + depth * 11}px`;
 
@@ -143,7 +142,7 @@ function renderNode(parent, node, depth, forceOpen, onOpen) {
   if (node.isDir) {
     row.title = `${node.files} file${node.files === 1 ? '' : 's'}`;
     row.addEventListener('click', () => {
-      if (collapsed.has(node.path)) collapsed.delete(node.path);
+      if (state.treeCollapsed.has(node.path)) collapsed.delete(node.path);
       else collapsed.add(node.path);
       window.dispatchEvent(new CustomEvent('dc:tree-refresh'));
     });

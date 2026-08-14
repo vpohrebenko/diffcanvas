@@ -6,6 +6,7 @@ package gitx
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -36,13 +37,23 @@ var baseArgs = []string{
 	"--no-pager",
 }
 
+// MaxOutput caps what a single git invocation may buffer.
+//
+// A patch has no size limit of its own — the 8 MB file cap applies to file
+// reads, not to `git diff` — so one enormous generated file could pull
+// hundreds of megabytes through the JSON encoder for a single card.
+const MaxOutput = 24 << 20
+
+// ErrTruncated reports that git produced more than MaxOutput.
+var ErrTruncated = errors.New("git output truncated")
+
 // run executes git and returns stdout. Stderr is folded into the error so
 // failures are diagnosable.
 func (r *Repo) run(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", append(baseArgs, args...)...)
 	cmd.Dir = r.Root
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	cmd.Stdout = &limitedBuffer{buf: &stdout, max: MaxOutput}
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
@@ -55,14 +66,33 @@ func (r *Repo) run(ctx context.Context, args ...string) ([]byte, error) {
 }
 
 // runAllowFail is for commands where a non-zero exit is a normal outcome
-// (git grep with no matches, git show on a missing path).
+// (git grep with no matches, cat-file on a missing path).
 func (r *Repo) runAllowFail(ctx context.Context, args ...string) []byte {
 	cmd := exec.CommandContext(ctx, "git", append(baseArgs, args...)...)
 	cmd.Dir = r.Root
 	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
+	cmd.Stdout = &limitedBuffer{buf: &stdout, max: MaxOutput}
 	_ = cmd.Run()
 	return stdout.Bytes()
+}
+
+// limitedBuffer stops accumulating past max but keeps draining, so git is
+// never blocked on a full pipe and exits normally.
+type limitedBuffer struct {
+	buf       *bytes.Buffer
+	max       int
+	Truncated bool
+}
+
+func (w *limitedBuffer) Write(p []byte) (int, error) {
+	if room := w.max - w.buf.Len(); room > 0 {
+		if len(p) <= room {
+			return w.buf.Write(p)
+		}
+		w.buf.Write(p[:room])
+	}
+	w.Truncated = true
+	return len(p), nil // discard the rest, but keep the pipe moving
 }
 
 // emptyTree is the hash of the empty tree object, used as the "parent" of a

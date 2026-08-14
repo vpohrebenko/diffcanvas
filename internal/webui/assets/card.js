@@ -15,6 +15,32 @@ import { select, isSelected, selectedCards } from './selection.js';
 const OVERSCAN = 6;
 
 /**
+ * Routes the rest of a drag to one element.
+ *
+ * Without capture, releasing the button outside the browser window never
+ * delivers pointerup: the card stays glued to the cursor and the move/up
+ * listener pair leaks, one more pair per drag.
+ */
+export function capturePointer(ev) {
+  try {
+    ev.currentTarget?.setPointerCapture?.(ev.pointerId);
+  } catch { /* not all pointer types can be captured */ }
+}
+
+/** Ends a drag on pointerup and on pointercancel alike. */
+export function onDragEnd(finish) {
+  const done = () => {
+    window.removeEventListener('pointermove', finish.move);
+    window.removeEventListener('pointerup', done);
+    window.removeEventListener('pointercancel', done);
+    finish.end();
+  };
+  window.addEventListener('pointermove', finish.move);
+  window.addEventListener('pointerup', done);
+  window.addEventListener('pointercancel', done);
+}
+
+/**
  * Per-card view. 'auto' follows the global unified/split toggle, except that an
  * added file has nothing on the old side, so side-by-side would waste half the
  * card on an empty column.
@@ -34,8 +60,12 @@ const CONTEXT_STEPS = [
   { label: 'all', value: 100000 },
 ];
 
-let onChange = () => {};
-export function setCardListener(fn) { onChange = fn; }
+let onChange = () => {};     // something moved
+let onCards = () => {};      // the set of cards changed
+export function setCardListener(geometry, cards) {
+  onChange = geometry;
+  onCards = cards || geometry;
+}
 
 export function createCard(path, opts = {}) {
   const existing = !opts.duplicate && state.cards.find(c => c.path === path);
@@ -44,7 +74,7 @@ export function createCard(path, opts = {}) {
     if (opts.line) {
       // The card may still be loading, in which case there are no rows to
       // scroll to yet; hand the line to applyData instead of dropping it.
-      if (existing.data) scrollToLine(existing, opts.line);
+      if (existing.data) revealLine(existing, opts.line);
       else existing.pendingLine = opts.line;
     }
     return existing;
@@ -73,7 +103,7 @@ export function createCard(path, opts = {}) {
   buildCardDOM(card);
   card.el.style.zIndex = String(topZ()); // never open behind existing cards
   loadCard(card);
-  onChange();
+  onCards();
   return card;
 }
 
@@ -83,7 +113,7 @@ export function removeCard(card) {
   state.arrows = state.arrows.filter(a => a.from !== card.id && a.to !== card.id);
   state.selection.delete(card.id);
   card.el?.remove();
-  onChange();
+  onCards();
 }
 
 export function focusCard(card) {
@@ -242,6 +272,7 @@ function buildCardDOM(card) {
   btnDup.addEventListener('click', () => {
     createCard(card.path, {
       duplicate: true, context: card.context,
+      view: card.view, fontScale: card.fontScale, // a copy, not a reset
       x: card.x + 40, y: card.y + 40, w: card.w, h: card.h,
     });
   });
@@ -363,8 +394,9 @@ function applyData(card) {
   updateChangeCounter(card);
 
   if (card.pendingLine) {
-    scrollToLine(card, card.pendingLine);
+    const line = card.pendingLine;
     card.pendingLine = 0;
+    revealLine(card, line);
   }
   onChange();
 }
@@ -427,11 +459,31 @@ function updateChangeCounter(card) {
 /** Scrolls a card so a given new-side line sits near the top. */
 export function scrollToLine(card, line) {
   const index = card.rows.findIndex(r =>
-    (r.kind === 'line' && r.new === line) ||
+    ((r.kind === 'line' || r.kind === 'newline') && r.new === line) ||
     (r.kind === 'pair' && r.r && r.r.new === line));
-  if (index < 0) return;
+  if (index < 0) return false; // the line is not in this card's rows
   card.bodyEl.scrollTop = Math.max(0, (index - 2) * rowH(card));
   renderRows(card);
+  return true;
+}
+
+/**
+ * Scrolls to a line, widening the card's context first if the line is not
+ * rendered.
+ *
+ * A changed file's card shows three lines of context, so a declaration is
+ * almost never among its rows: jumping to it silently did nothing while
+ * reporting success. Falling back to whole-file context makes the target
+ * exist before trying again.
+ */
+export async function revealLine(card, line) {
+  if (scrollToLine(card, line)) return true;
+  if (card.data && card.data.mode === 'diff' && card.context < 100000) {
+    card.context = 100000;
+    await loadCard(card);
+    return scrollToLine(card, line);
+  }
+  return false;
 }
 
 /** Flattens the payload into a uniform, fixed-height row list. */
@@ -488,6 +540,7 @@ function buildRows(card) {
 function layoutRows(card) {
   card.anchors = null;
   card.anchorIdx = null;
+  updateChangeCounter(card);
   card.spacerEl.style.height = `${card.rows.length * rowH(card)}px`;
   card.renderedFirst = card.renderedLast = -1;
   renderRows(card);
@@ -691,9 +744,12 @@ function metrics(segs) {
   let text = '';
   for (const s of segs || []) text += s.t;
   const trimmed = text.replace(/^[ \t]+/, '');
-  let indent = text.length - trimmed.length;
-  // A tab reads as far wider than one column.
-  for (let i = 0; i < indent; i++) if (text[i] === '\t') indent += 3;
+  const raw = text.length - trimmed.length;
+  // A tab reads as wider than one column. Counted over the leading whitespace
+  // only: growing the loop bound as tabs were found walked into the code and
+  // counted tabs that were not indentation.
+  let indent = raw;
+  for (let i = 0; i < raw; i++) if (text[i] === '\t') indent += 3;
   return { ind: indent, len: text.length };
 }
 
@@ -926,6 +982,7 @@ export function rebuildAll() {
 
 function startDrag(card, ev) {
   ev.preventDefault();
+  capturePointer(ev);
 
   // Dragging an unselected card selects it first, so a drag always moves
   // exactly what the outline says it will.
@@ -953,18 +1010,16 @@ function startDrag(card, ev) {
   const up = () => {
     document.body.classList.remove('dragging');
     for (const c of moving) c.el.classList.remove('dragging');
-    window.removeEventListener('pointermove', move);
-    window.removeEventListener('pointerup', up);
     onChange();
   };
-  window.addEventListener('pointermove', move);
-  window.addEventListener('pointerup', up);
+  onDragEnd({ move, end: up });
 }
 
 function startResize(card, ev, dir = 'se') {
   if (card.collapsed) return; // nothing to resize; would leave an empty box
   ev.preventDefault();
   ev.stopPropagation();
+  capturePointer(ev);
   const startX = ev.clientX, startY = ev.clientY;
   const ow = card.w, oh = card.h, ox = card.x, oy = card.y;
   document.body.classList.add('dragging');
@@ -995,11 +1050,8 @@ function startResize(card, ev, dir = 'se') {
   };
   const up = () => {
     document.body.classList.remove('dragging');
-    window.removeEventListener('pointermove', move);
-    window.removeEventListener('pointerup', up);
     drawStrip(card);
     onChange();
   };
-  window.addEventListener('pointermove', move);
-  window.addEventListener('pointerup', up);
+  onDragEnd({ move, end: up });
 }

@@ -235,7 +235,7 @@ func TestPatchHunks(t *testing.T) {
 	changes, _ := Changes(ctx, r, spec)
 	fc := find(t, changes, "a.go")
 
-	hunks, err := Patch(ctx, r, spec, &fc, 3)
+	hunks, _, err := Patch(ctx, r, spec, &fc, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +395,7 @@ func TestPatchIsolatesRequestedFile(t *testing.T) {
 			t.Errorf("unexpected change %q", fc.Path)
 			continue
 		}
-		hunks, err := Patch(ctx, r, spec, &fc, 3)
+		hunks, _, err := Patch(ctx, r, spec, &fc, 3)
 		if err != nil {
 			t.Errorf("%s: %v", fc.Path, err)
 			continue

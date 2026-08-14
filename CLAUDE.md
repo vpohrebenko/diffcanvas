@@ -51,8 +51,11 @@ indexes bytes, JavaScript indexes UTF-16, and the mismatch silently corrupts
 any line containing non-ASCII. `server.splitOnMarks` must preserve this when it
 splits segments for the word diff.
 
-**`ROW_H` (card.js) must equal `--row-h` (style.css).** Row virtualisation
-assumes every row is exactly that tall. If they drift, rows overlap or gap.
+**Row height is computed, not constant.** `rowH(card)` in `store.js` derives it
+from `BASE_ROW_H` and the card's font scale, and writes `--row-h` onto the card
+element. Row virtualisation assumes every row in a card is exactly that tall, so
+anything that changes the code font must go through `applyFontScale`. The
+`--row-h` in style.css is only a default that JS immediately overwrites.
 
 **Pathspecs must be `:(literal)`-prefixed.** A file named `a*.txt` otherwise
 globs onto its neighbours and `:weird.txt` is parsed as pathspec magic. Use
@@ -63,6 +66,19 @@ both source and destination, and sections are ordered by path, not by pathspec
 order. `parseHunks` demultiplexes by path; do not simplify it back to "parse
 the whole patch as one file", or a card will show another file's diff and the
 `--- a/x` / `+++ b/x` headers will appear as diff rows.
+
+**Bound the work a single request can do.** `maxWordDiffPairs` is charged
+before `diffx.Compare` runs, not after it succeeds — a comparison that comes
+back "too dissimilar" still built the whole O(n*m) table. `gitx.MaxOutput` caps
+what one git invocation may buffer, because a patch has no size limit of its
+own and one generated file could otherwise pull hundreds of megabytes through
+the JSON encoder.
+
+**Resolution must not claim confidence it has not earned.** `gosym` returns an
+error rather than a best guess when a package is in the repository but does not
+declare the name, and refuses to follow a constructor across package
+boundaries. The UI opens nothing on a `guess` — a wrong answer that looks
+certain is worse than an explicit failure.
 
 **Never cache an error, and never compute cached state on a request context.**
 `server.changes` and `server.symbols` run on `context.Background()`. Using the

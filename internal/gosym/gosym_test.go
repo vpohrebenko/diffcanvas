@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/vpohrebenko/diffcanvas/internal/gitx"
+	"github.com/vpohrebenko/diffcanvas/internal/gomod"
 )
 
 func newRepo(t *testing.T, files map[string]string) *gitx.Repo {
@@ -40,7 +41,7 @@ func buildIndex(t *testing.T, files map[string]string) *Index {
 	ix := &Index{
 		byName:  map[string][]Def{},
 		imports: map[string]map[string]string{},
-		modules: findModules(context.Background(), repo, gitx.RevWorktree, keys(files)),
+		modules: gomod.Find(context.Background(), repo, gitx.RevWorktree, keys(files)),
 	}
 	for name := range files {
 		if filepath.Ext(name) == ".go" {
@@ -480,5 +481,91 @@ func run(things map[string]interface{}) {
 	}
 	if !got.Ambiguous {
 		t.Errorf("expected alternatives to be offered, got %+v", got)
+	}
+}
+
+// TestBodylessFuncDoesNotPanic: assembly-backed, cgo and //go:linkname
+// declarations are valid Go and parse with a nil Body, which the AST walk
+// dereferenced.
+func TestBodylessFuncDoesNotPanic(t *testing.T) {
+	files := map[string]string{
+		"go.mod": testModule,
+		"a/asm.go": `package a
+
+type T struct{}
+
+func (t *T) Validate() error { return nil }
+
+//go:noescape
+func fastPath(x []byte) int
+`,
+	}
+	ix := buildIndex(t, files)
+	// The click lands on the bodyless declaration; must not panic.
+	if _, err := ix.Lookup("Validate", "zz", "a/asm.go", 8, files["a/asm.go"]); err != nil {
+		t.Logf("lookup error (acceptable): %v", err)
+	}
+}
+
+// TestConstructorDoesNotCrossPackages: resolving a bare constructor name
+// repository-wide returned an unrelated type and labelled it certain, which is
+// worse than not inferring at all.
+func TestConstructorDoesNotCrossPackages(t *testing.T) {
+	files := map[string]string{
+		"go.mod": testModule,
+		"aaa/aaa.go": `package aaa
+
+type Client struct{}
+
+func (c *Client) Close() {}
+
+func New() *Client { return &Client{} }
+`,
+		"zzz/zzz.go": `package zzz
+
+type Server struct{}
+
+func (s *Server) Close() {}
+
+func New() *Server { return &Server{} }
+`,
+		"zzz/use.go": `package zzz
+
+func run() {
+	s := New()
+	s.Close()
+}
+`,
+	}
+	ix := buildIndex(t, files)
+	got, err := ix.Lookup("Close", "s", "zzz/use.go", 5, files["zzz/use.go"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Def.Recv != "Server" {
+		t.Errorf("resolved to %s.Close in %s, want Server.Close in zzz",
+			got.Def.Recv, got.Def.Path)
+	}
+}
+
+// TestInRepoPackageMissingNameErrors: an in-repo package that does not declare
+// the name must not fall through to an unrelated match reported as "unique".
+func TestInRepoPackageMissingNameErrors(t *testing.T) {
+	files := map[string]string{
+		"go.mod": "module example.com/m\n",
+		"cmd/main.go": `package main
+
+import "example.com/m/aaa"
+
+func main() { aaa.Absent() }
+`,
+		"aaa/aaa.go":     "package aaa\n\nfunc Present() {}\n",
+		"other/other.go": "package other\n\nfunc Absent() {}\n",
+	}
+	ix := buildIndex(t, files)
+	got, err := ix.Lookup("Absent", "aaa", "cmd/main.go", 5, files["cmd/main.go"])
+	if err == nil {
+		t.Errorf("resolved to %+v with confidence %q; want an error",
+			got.Def, got.Confidence)
 	}
 }
