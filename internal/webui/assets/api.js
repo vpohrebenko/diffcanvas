@@ -17,7 +17,7 @@ async function get(path, params = {}) {
 export const api = {
   meta: () => get('/api/meta'),
   changes: () => get('/api/changes'),
-  file: (path, mode, context) => get('/api/file', { path, mode, context }),
+  file: (path, context) => get('/api/file', { path, context }),
   tree: () => get('/api/tree'),
   grep: (q, ignoreCase) => get('/api/grep', { q, i: ignoreCase ? '1' : '0' }),
 

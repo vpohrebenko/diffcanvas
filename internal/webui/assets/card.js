@@ -328,7 +328,7 @@ async function loadCard(card) {
   const generation = (card.loadGen = (card.loadGen || 0) + 1);
   let data;
   try {
-    data = await api.file(card.path, 'diff', card.context);
+    data = await api.file(card.path, card.context);
   } catch (err) {
     if (generation !== card.loadGen) return;
     card.langEl.textContent = 'error';
@@ -502,9 +502,8 @@ function buildRows(card) {
 
   const rows = [];
   if (d.mode === 'full') {
-    const changed = new Set(d.changed || []);
     for (const l of d.lines || []) {
-      rows.push({ kind: 'line', t: ' ', old: l.old, new: l.new, segs: l.segs, changed: changed.has(l.new) });
+      rows.push({ kind: 'line', t: ' ', old: l.old, new: l.new, segs: l.segs });
     }
     if (!rows.length) rows.push({ kind: 'note', text: 'empty file' });
     return rows;
@@ -706,8 +705,11 @@ function identifierAt(clientX, clientY) {
   let qual = '';
   if (row) {
     const before = rowTextBefore(row, node, start);
-    const match = before.match(/([A-Za-z0-9_]+)\s*\.\s*$/);
-    if (match) qual = match[1];
+    // The whole dotted chain, not just the nearest identifier: `s.cfg.Validate`
+    // needs `s.cfg` to pick the right Validate, and only the receiver's type
+    // can decide that.
+    const match = before.match(/([A-Za-z0-9_]+(?:\s*\.\s*[A-Za-z0-9_]+)*)\s*\.\s*$/);
+    if (match) qual = match[1].replace(/\s+/g, '');
   }
   // The line number lets the server infer what a variable qualifier refers to.
   const holder = node.parentElement?.closest('[data-line]');

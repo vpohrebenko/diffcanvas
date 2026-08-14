@@ -42,6 +42,9 @@ type Index struct {
 	// imports maps a file to the import paths of its qualifiers, so `util.X`
 	// in one file and `util.X` in another can resolve to different packages.
 	imports map[string]map[string]string
+	// Field types per struct, so `s.cfg.Validate()` can be followed one hop
+	// further than a local variable.
+	fields map[string]map[string]string
 	// Every module in the repository, not just one at the root.
 	modules gomod.Set
 }
@@ -59,6 +62,7 @@ func Build(ctx context.Context, repo *gitx.Repo, rev string) (*Index, error) {
 	ix := &Index{
 		byName:  make(map[string][]Def),
 		imports: make(map[string]map[string]string),
+		fields:  make(map[string]map[string]string),
 		modules: gomod.Find(ctx, repo, rev, paths),
 	}
 
@@ -156,6 +160,7 @@ func (ix *Index) addFile(ctx context.Context, repo *gitx.Repo, rev, filePath str
 					if s.Name != nil {
 						ix.add(Def{Name: s.Name.Name, Path: filePath, Line: line(s.Pos()),
 							Kind: kind, Pkg: pkgName})
+						ix.addFields(s)
 					}
 				case *ast.ValueSpec:
 					for _, n := range s.Names {
@@ -172,6 +177,36 @@ func (ix *Index) addFile(ctx context.Context, repo *gitx.Repo, rev, filePath str
 }
 
 func (ix *Index) add(d Def) { ix.byName[d.Name] = append(ix.byName[d.Name], d) }
+
+// addFields records a struct's field types, including embedded fields, which
+// are named after the type they embed.
+func (ix *Index) addFields(spec *ast.TypeSpec) {
+	st, ok := spec.Type.(*ast.StructType)
+	if !ok || st.Fields == nil {
+		return
+	}
+	if ix.fields == nil {
+		ix.fields = make(map[string]map[string]string)
+	}
+	byField := ix.fields[spec.Name.Name]
+	if byField == nil {
+		byField = make(map[string]string)
+		ix.fields[spec.Name.Name] = byField
+	}
+	for _, f := range st.Fields.List {
+		typ := typeName(f.Type)
+		if typ == "" {
+			continue
+		}
+		if len(f.Names) == 0 {
+			byField[typ] = typ // embedded: the field is named for its type
+			continue
+		}
+		for _, n := range f.Names {
+			byField[n.Name] = typ
+		}
+	}
+}
 
 // typeName reduces an expression like `*pkg.Foo[T]` to `Foo`.
 func typeName(expr ast.Expr) string {
@@ -313,6 +348,30 @@ func (ix *Index) inferLocalType(src, qual string, line int, fromDir string) stri
 	return best
 }
 
+// resolveChain resolves a dotted qualifier such as `s.cfg.inner` to a type
+// name: the head is a local variable, and each remaining element is a field of
+// the type before it.
+//
+// One hop covers the common shape — a service holding its config or client —
+// and each hop is an exact field lookup, so this stays a fact rather than a
+// guess. It stops at the first element it cannot name, and the caller then
+// falls back to the weaker steps.
+func (ix *Index) resolveChain(src, chain string, line int, fromDir string) string {
+	parts := strings.Split(chain, ".")
+	typ := ix.inferLocalType(src, parts[0], line, fromDir)
+	if typ == "" {
+		return ""
+	}
+	for _, field := range parts[1:] {
+		next, ok := ix.fields[typ][field]
+		if !ok {
+			return "" // an unknown field means the rest of the chain is unknown
+		}
+		typ = next
+	}
+	return typ
+}
+
 // typeOfExpr names the type an expression produces, where that is decidable
 // without a type checker.
 func (ix *Index) typeOfExpr(expr ast.Expr, fromDir string) string {
@@ -404,11 +463,12 @@ func (ix *Index) Lookup(name, qual, fromPath string, line int, src string) (Resu
 		}
 	}
 
-	// 3. The qualifier is a local variable: infer its type and take the method
-	// on that type. This is what makes `req.Validate()` land on the right
-	// Validate rather than on whichever one happened to sort first.
+	// 3. The qualifier is a local variable, possibly followed through struct
+	// fields: infer its type and take the method on that type. This is what
+	// makes `req.Validate()` and `s.cfg.Validate()` land on the right Validate
+	// rather than on whichever one happened to sort first.
 	if qual != "" {
-		if recv := ix.inferLocalType(src, qual, line, fromDir); recv != "" {
+		if recv := ix.resolveChain(src, qual, line, fromDir); recv != "" {
 			var onType []Def
 			for _, d := range candidates {
 				if d.Kind == "method" && d.Recv == recv {

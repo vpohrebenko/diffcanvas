@@ -808,9 +808,33 @@ function setupDebugOverlay() {
   window.addEventListener('click', report, true);
 }
 
+/**
+ * Surfaces a fatal script error in the DOM.
+ *
+ * A module that throws on load leaves a blank page and a message only in the
+ * console, where no test and no bug report can see it. Writing it into the
+ * document makes the failure visible to a reader and assertable by a headless
+ * browser check.
+ */
+function reportFatalErrors() {
+  const show = message => {
+    let box = document.getElementById('dc-error');
+    if (!box) {
+      box = el('div');
+      box.id = 'dc-error';
+      document.body.appendChild(box);
+    }
+    box.textContent = `diffcanvas failed: ${message}`;
+  };
+  window.addEventListener('error', ev => show(ev.message || String(ev.error)));
+  window.addEventListener('unhandledrejection', ev =>
+    show((ev.reason && ev.reason.message) || String(ev.reason)));
+}
+
 // ── start ────────────────────────────────────────────────────────────────
 
 async function main() {
+  reportFatalErrors();
   setCardListener(onGeometryChange, onCardsChanged);
   window.addEventListener('dc:jump', ev =>
     jumpToDefinition(ev.detail.card, ev.detail.name, ev.detail.qual, ev.detail.line, ev.detail.separate));
@@ -870,4 +894,8 @@ async function main() {
 
 main().catch(err => {
   document.getElementById('spec-label').textContent = `error: ${err.message || err}`;
+  const box = document.createElement('div');
+  box.id = 'dc-error';
+  box.textContent = `diffcanvas failed: ${err.message || err}`;
+  document.body.appendChild(box);
 });

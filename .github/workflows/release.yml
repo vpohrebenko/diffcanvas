@@ -1,0 +1,74 @@
+name: Release
+
+# The distribution story is "copy one binary to the machine you review on",
+# which should be a download rather than a build — particularly on a locked-down
+# work machine that may have no Go toolchain at all.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (must already exist)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  binaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      # Never publish something that does not pass its own tests.
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        run: |
+          set -eu
+          version="${{ github.event.inputs.tag || github.ref_name }}"
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
+            goos=${target%/*}
+            goarch=${target#*/}
+            ext=""
+            [ "$goos" = "windows" ] && ext=".exe"
+            out="dist/diffcanvas-${version}-${goos}-${goarch}${ext}"
+            # CGO off and -trimpath: reproducible, and runs on a machine with
+            # no toolchain and no matching libc.
+            CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch \
+              go build -trimpath -ldflags="-s -w" -o "$out" ./cmd/diffcanvas
+            echo "built $out"
+          done
+          (cd dist && sha256sum * > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            Single static binary — no runtime, no install, nothing to vet.
+            Requires `git` on `PATH`.
+
+            Pick the build for the machine you review on, make it executable,
+            and run it in a repository:
+
+            ```
+            diffcanvas main...feature
+            ```
+
+            Under WSL, use the `linux-amd64` build and run it inside WSL: the
+            printed `127.0.0.1` URL opens directly in the Windows browser.
+
+            Checksums are in `SHA256SUMS`.

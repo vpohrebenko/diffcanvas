@@ -41,6 +41,7 @@ func buildIndex(t *testing.T, files map[string]string) *Index {
 	ix := &Index{
 		byName:  map[string][]Def{},
 		imports: map[string]map[string]string{},
+		fields:  map[string]map[string]string{},
 		modules: gomod.Find(context.Background(), repo, gitx.RevWorktree, keys(files)),
 	}
 	for name := range files {
@@ -567,5 +568,120 @@ func main() { aaa.Absent() }
 	if err == nil {
 		t.Errorf("resolved to %+v with confidence %q; want an error",
 			got.Def, got.Confidence)
+	}
+}
+
+// TestStructFieldChain: `s.cfg.Validate()` is the shape left over once local
+// variables are handled — a service reaching through a field it holds.
+func TestStructFieldChain(t *testing.T) {
+	files := map[string]string{
+		"go.mod": testModule,
+		"a/a.go": `package a
+
+type Config struct{}
+
+func (c *Config) Validate() error { return nil }
+
+type Client struct{}
+
+func (c *Client) Validate() error { return nil }
+
+type Inner struct {
+	deep *Config
+}
+
+type Server struct {
+	cfg    *Config
+	client *Client
+	inner  Inner
+}
+
+func (s *Server) run() {
+	s.cfg.Validate()
+	s.client.Validate()
+	s.inner.deep.Validate()
+}
+`,
+	}
+	ix := buildIndex(t, files)
+	src := files["a/a.go"]
+
+	for _, tc := range []struct{ chain, want string }{
+		{"s.cfg", "Config"},
+		{"s.client", "Client"},
+		{"s.inner.deep", "Config"}, // two hops
+	} {
+		got, err := ix.Lookup("Validate", tc.chain, "a/a.go", 24, src)
+		if err != nil {
+			t.Errorf("%s.Validate: %v", tc.chain, err)
+			continue
+		}
+		if got.Def.Recv != tc.want {
+			t.Errorf("%s.Validate resolved to %s.Validate, want %s.Validate",
+				tc.chain, got.Def.Recv, tc.want)
+		}
+		if got.Confidence != "receiver-type" {
+			t.Errorf("%s.Validate confidence = %q, want receiver-type", tc.chain, got.Confidence)
+		}
+	}
+}
+
+// TestEmbeddedFieldChain: an embedded field is named for the type it embeds.
+func TestEmbeddedFieldChain(t *testing.T) {
+	files := map[string]string{
+		"go.mod": testModule,
+		"a/a.go": `package a
+
+type Base struct{}
+
+func (b *Base) Validate() error { return nil }
+
+type Other struct{}
+
+func (o *Other) Validate() error { return nil }
+
+type Wrapper struct {
+	*Base
+}
+
+func run(w *Wrapper) {
+	w.Base.Validate()
+}
+`,
+	}
+	ix := buildIndex(t, files)
+	got, err := ix.Lookup("Validate", "w.Base", "a/a.go", 17, files["a/a.go"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Def.Recv != "Base" {
+		t.Errorf("resolved to %s, want Base", got.Def.Recv)
+	}
+}
+
+// TestUnknownFieldStopsTheChain: an unresolvable hop must not silently fall
+// back to some type further up the chain.
+func TestUnknownFieldStopsTheChain(t *testing.T) {
+	files := map[string]string{
+		"go.mod": testModule,
+		"a/a.go": `package a
+
+type Config struct{}
+
+func (c *Config) Validate() error { return nil }
+
+type Server struct {
+	cfg *Config
+}
+
+func (s *Server) run() {
+	s.mystery.Validate()
+}
+`,
+	}
+	ix := buildIndex(t, files)
+	got, err := ix.Lookup("Validate", "s.mystery", "a/a.go", 12, files["a/a.go"])
+	if err == nil && got.Confidence == "receiver-type" {
+		t.Errorf("claimed a receiver type through an unknown field: %+v", got.Def)
 	}
 }

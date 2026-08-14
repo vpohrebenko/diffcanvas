@@ -437,6 +437,13 @@ kbd {
 
 body.jumping .card-body { cursor: alias; }
 
+/* Only present when a script has failed; visible rather than console-only. */
+#dc-error {
+  position: fixed; left: 50%; top: 12px; transform: translateX(-50%); z-index: 9999;
+  background: var(--del); color: #14090a; font-size: 12px; font-weight: 600;
+  padding: 8px 14px; border-radius: 7px; max-width: 90vw;
+}
+
 /* Candidate picker for jump-to-definition. */
 #def-picker {
   position: fixed; left: 50%; top: 70px; transform: translateX(-50%); z-index: 500;

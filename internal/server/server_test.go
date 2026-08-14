@@ -56,6 +56,9 @@ func newHarness(t *testing.T, revspec string) *harness {
 	run("config", "user.name", "t")
 	run("config", "user.email", "t@e")
 	write("main.go", "package main\n\nfunc main() {\n\tprintln(\"one\")\n}\n")
+	// Never touched again, so it is tracked but outside every change set —
+	// which is how the Files tab and search hits reach a file.
+	write("untouched.md", "# untouched\n\nstill here\n")
 	run("add", "-A")
 	run("commit", "-qm", "first")
 	write("main.go", "package main\n\nfunc main() {\n\tprintln(\"two\")\n\tprintln(\"three\")\n}\n")
@@ -251,14 +254,30 @@ func TestChangesAndFile(t *testing.T) {
 		t.Error("diff rows carry no keyword highlighting")
 	}
 
-	// Full mode must return the whole file and mark the added lines.
-	var full FileView
-	h.getJSON(t, "/api/file?path=main.go&mode=full", &full)
-	if full.Mode != "full" || len(full.Lines) != 6 {
-		t.Errorf("full view: mode=%q lines=%d, want full/6", full.Mode, len(full.Lines))
+	// A file outside the change set is served whole. There is no mode
+	// parameter: "whole file" for a changed file is the context continuum at
+	// its maximum, which is why side-by-side keeps working at every step.
+	var untouched FileView
+	h.getJSON(t, "/api/file?path=untouched.md", &untouched)
+	if untouched.Mode != "full" {
+		t.Errorf("an unchanged file came back as %q, want full", untouched.Mode)
 	}
-	if len(full.Changed) == 0 {
-		t.Error("full view did not mark any changed lines")
+	if len(untouched.Lines) == 0 {
+		t.Error("an unchanged file came back with no lines")
+	}
+
+	// Maximum context on a changed file reaches the whole file.
+	var whole FileView
+	h.getJSON(t, "/api/file?path=main.go&context=100000", &whole)
+	if whole.Mode != "diff" {
+		t.Errorf("a changed file came back as %q, want diff", whole.Mode)
+	}
+	var rendered int
+	for _, hunk := range whole.Hunks {
+		rendered += len(hunk.Lines)
+	}
+	if rendered < 6 {
+		t.Errorf("whole-file context rendered %d rows, want at least the file's 6", rendered)
 	}
 }
 

@@ -123,7 +123,6 @@ type FileView struct {
 	Dels    int        `json:"dels"`
 	Hunks   []HunkView `json:"hunks,omitempty"`
 	Lines   []LineView `json:"lines,omitempty"`
-	Changed []int      `json:"changed,omitempty"` // new-side line numbers that were added
 	Context int        `json:"context"`
 }
 
@@ -132,10 +131,6 @@ func (s *Server) handleFile(ctx context.Context, r *http.Request) (any, error) {
 	path := q.Get("path")
 	if path == "" {
 		return nil, fmt.Errorf("path is required")
-	}
-	mode := q.Get("mode")
-	if mode == "" {
-		mode = "diff"
 	}
 	contextLines := 3
 	if v := q.Get("context"); v != "" {
@@ -148,10 +143,13 @@ func (s *Server) handleFile(ctx context.Context, r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A file outside the change set — opened from the Files tab or a search
+	// hit — has no diff to show, so it is served whole. There is no explicit
+	// mode: "whole file" for a changed file is the context continuum at its
+	// maximum, which keeps side-by-side working at every step.
 	fc := byPath[path]
-
-	if mode == "full" || fc == nil {
-		return s.fullFileView(ctx, path, fc, contextLines)
+	if fc == nil {
+		return s.fullFileView(ctx, path, contextLines)
 	}
 	return s.diffFileView(ctx, fc, contextLines)
 }
@@ -291,18 +289,10 @@ func splitOnMarks(segs []highlight.Segment, marks []diffx.Mark) []highlight.Segm
 
 // fullFileView returns a whole file, optionally annotating which lines the
 // change set added so the diff is still visible in full context.
-func (s *Server) fullFileView(ctx context.Context, path string, fc *gitx.FileChange, contextLines int) (*FileView, error) {
+func (s *Server) fullFileView(ctx context.Context, path string, contextLines int) (*FileView, error) {
 	requested := path
 	rev := s.Spec.NewRev
 	status := "unchanged"
-	if fc != nil {
-		status = fc.Status
-		// A deleted file has no new-side content; show it as it last existed.
-		if fc.Status == "deleted" {
-			rev = s.Spec.OldRev
-			path = oldPathOf(fc)
-		}
-	}
 
 	file, err := gitx.ReadFile(ctx, s.Repo, rev, path)
 	if err != nil {
@@ -310,13 +300,8 @@ func (s *Server) fullFileView(ctx context.Context, path string, fc *gitx.FileCha
 	}
 
 	view := &FileView{
-		// The requested path, not the old one a deletion was read from: the
-		// client keys its cards on what it asked for.
 		Path: requested, Status: status, Lang: highlight.Detect(path), Mode: "full",
 		Binary: file.Binary, Trunc: file.Trunc, Context: contextLines,
-	}
-	if fc != nil {
-		view.OldPath, view.Adds, view.Dels = fc.OldPath, fc.Adds, fc.Dels
 	}
 	if file.Binary {
 		return view, nil
@@ -328,18 +313,6 @@ func (s *Server) fullFileView(ctx context.Context, path string, fc *gitx.FileCha
 		view.Lines[i] = LineView{T: " ", Old: i + 1, New: i + 1, Segs: segsAt(segs, i+1, text)}
 	}
 
-	// Mark added lines so a full-file card still shows where the change is.
-	if fc != nil && !fc.Binary && fc.Status != "deleted" {
-		if hunks, _, err := gitx.Patch(ctx, s.Repo, s.Spec, fc, 0); err == nil {
-			for _, h := range hunks {
-				for _, l := range h.Lines {
-					if l.T == "+" {
-						view.Changed = append(view.Changed, l.New)
-					}
-				}
-			}
-		}
-	}
 	return view, nil
 }
 

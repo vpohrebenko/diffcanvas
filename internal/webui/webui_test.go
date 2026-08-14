@@ -58,7 +58,8 @@ var (
 // createdInJS are elements the scripts build themselves, so they are
 // legitimately absent from index.html.
 var createdInJS = map[string]bool{
-	"def-picker": true,
+	"def-picker": true, // the jump-to-definition candidate list
+	"dc-error":   true, // only exists once a script has failed
 }
 
 func TestEveryReferencedElementIDExists(t *testing.T) {
