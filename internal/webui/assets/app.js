@@ -26,7 +26,11 @@ let allPaths = [];
 // ── canvas transform ─────────────────────────────────────────────────────
 
 function applyTransform() {
-  world.style.transform = `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.scale})`;
+  // Whole-pixel translation: a fractional offset makes every glyph land
+  // between device pixels, which is most of why text looked soft at 100%.
+  const px = Math.round(state.pan.x);
+  const py = Math.round(state.pan.y);
+  world.style.transform = `translate(${px}px, ${py}px) scale(${state.scale})`;
   zoomBadge.textContent = `${Math.round(state.scale * 100)}%`;
   applyLOD();
   drawMinimap();
@@ -267,7 +271,7 @@ function snapshot() {
     viewed: [...state.viewed],
     cards: state.cards.map(c => ({
       path: c.path, x: c.x, y: c.y, w: c.w, h: c.h,
-      collapsed: c.collapsed, context: c.context, id: c.id,
+      collapsed: c.collapsed, context: c.context, view: c.view, id: c.id,
     })),
     arrows: state.arrows,
   };
@@ -292,7 +296,8 @@ async function restoreLayout() {
   const remap = new Map();
   for (const c of saved.cards) {
     const card = createCard(c.path, {
-      x: c.x, y: c.y, w: c.w, h: c.h, context: c.context ?? 3, duplicate: true,
+      x: c.x, y: c.y, w: c.w, h: c.h, context: c.context ?? 3,
+      view: c.view ?? 'auto', duplicate: true,
     });
     if (c.collapsed) setCollapsed(card, true);
     remap.set(c.id, card.id);

@@ -14,6 +14,18 @@ import { select, isSelected, selectedCards } from './selection.js';
 
 const OVERSCAN = 6;
 
+/**
+ * Per-card view. 'auto' follows the global unified/split toggle, except that an
+ * added file has nothing on the old side, so side-by-side would waste half the
+ * card on an empty column.
+ */
+const VIEW_OPTIONS = [
+  { value: 'auto', label: 'auto', title: 'Follow the toolbar; new files show only the new side' },
+  { value: 'unified', label: 'uni', title: 'Unified, this card only' },
+  { value: 'split', label: 'split', title: 'Side by side, this card only' },
+  { value: 'new', label: 'new', title: 'New side only — no deletions, no empty column' },
+];
+
 /** The context continuum. "all" is a context wide enough to swallow any file. */
 const CONTEXT_STEPS = [
   { label: '3', value: 3 },
@@ -46,6 +58,9 @@ export function createCard(path, opts = {}) {
     w: opts.w ?? 640,
     h: opts.h ?? 440,
     collapsed: false,
+    // 'auto' follows the global unified/split setting, except for added files
+    // where it drops the empty old-side column. Anything else pins this card.
+    view: opts.view ?? 'auto',
     context: opts.context ?? 3,
     pendingLine: opts.line || 0,
     data: null,
@@ -117,7 +132,25 @@ function buildCardDOM(card) {
   // ── footer: language, then the context continuum ──
   const foot = el('div', 'card-foot');
   const lang = el('span', 'foot-lang', 'loading…');
-  const ctxSeg = el('div', 'ctx-seg');
+
+  const viewSeg = el('div', 'foot-seg');
+  viewSeg.appendChild(el('span', 'ctx-label', 'view'));
+  for (const opt of VIEW_OPTIONS) {
+    const b = el('button', '', opt.label);
+    b.title = opt.title;
+    b.dataset.view = opt.value;
+    b.addEventListener('click', ev => {
+      ev.stopPropagation();
+      card.view = opt.value;
+      card.rows = buildRows(card);
+      layoutRows(card);
+      syncViewButtons(card);
+      onChange();
+    });
+    viewSeg.appendChild(b);
+  }
+
+  const ctxSeg = el('div', 'ctx-seg foot-seg');
   ctxSeg.appendChild(el('span', 'ctx-label', 'context'));
   for (const step of CONTEXT_STEPS) {
     const b = el('button', '', step.label);
@@ -131,7 +164,7 @@ function buildCardDOM(card) {
     });
     ctxSeg.appendChild(b);
   }
-  foot.append(lang, ctxSeg);
+  foot.append(lang, viewSeg, ctxSeg);
 
   // ── edge ports for arrows ──
   const portL = el('div', 'port left');
@@ -144,7 +177,8 @@ function buildCardDOM(card) {
 
   Object.assign(card, {
     el: node, headEl: head, bodyEl: body, rowsEl: rows, spacerEl: spacer,
-    dotEl: dot, countsEl: counts, langEl: lang, stripEl: strip, ctxSegEl: ctxSeg,
+    dotEl: dot, countsEl: counts, langEl: lang, stripEl: strip,
+    ctxSegEl: ctxSeg, viewSegEl: viewSeg,
   });
 
   body.addEventListener('scroll', () => renderRows(card), { passive: true });
@@ -238,6 +272,24 @@ async function loadCard(card) {
   applyData(card);
 }
 
+/** The view this card actually renders in, after resolving 'auto'. */
+function effectiveView(card) {
+  if (card.view !== 'auto') return card.view;
+  if (card.data && card.data.status === 'added') return 'new';
+  return state.diffMode;
+}
+
+function syncViewButtons(card) {
+  const active = effectiveView(card);
+  for (const b of card.viewSegEl.querySelectorAll('button')) {
+    const v = b.dataset.view;
+    // Two different facts, so two different marks: 'on' is what you chose,
+    // 'resolved' is what 'auto' currently works out to.
+    b.classList.toggle('on', v === card.view);
+    b.classList.toggle('resolved', card.view === 'auto' && v === active);
+  }
+}
+
 function syncContextButtons(card) {
   for (const b of card.ctxSegEl.querySelectorAll('button')) {
     b.classList.toggle('on', Number(b.dataset.ctx) === card.context);
@@ -262,7 +314,9 @@ function applyData(card) {
 
   // An unchanged file has no hunks, so the context continuum is meaningless.
   card.ctxSegEl.style.display = d.mode === 'full' ? 'none' : '';
+  card.viewSegEl.style.display = d.mode === 'full' ? 'none' : '';
   syncContextButtons(card);
+  syncViewButtons(card);
 
   card.rows = buildRows(card);
   layoutRows(card);
@@ -299,13 +353,19 @@ function buildRows(card) {
     return rows;
   }
 
-  const split = state.diffMode === 'split';
+  const view = effectiveView(card);
   for (const h of d.hunks || []) {
     rows.push({ kind: 'hunk', header: h.header, oldStart: h.oldStart, newStart: h.newStart });
-    if (split) {
+    if (view === 'split') {
       // Pairing comes from the server so it agrees with the word-level diff.
       for (const [oi, ni] of h.pairs || []) {
         rows.push({ kind: 'pair', l: oi >= 0 ? h.lines[oi] : null, r: ni >= 0 ? h.lines[ni] : null });
+      }
+    } else if (view === 'new') {
+      // Only the resulting file: no deletions, one gutter, no sign column.
+      for (const l of h.lines) {
+        if (l.t === '-') continue;
+        rows.push({ kind: 'newline', new: l.new, segs: l.segs, added: l.t === '+', noNL: l.noNL });
       }
     } else {
       for (const l of h.lines) rows.push({ kind: 'line', ...l });
@@ -344,6 +404,7 @@ function renderRow(row) {
   if (row.kind === 'hunk') return renderHunkRow(row);
   if (row.kind === 'note') return el('div', 'row note', row.text);
   if (row.kind === 'pair') return renderPairRow(row);
+  if (row.kind === 'newline') return renderNewRow(row);
 
   const cls = row.t === '+' ? 'row add'
     : row.t === '-' ? 'row del'
@@ -354,6 +415,16 @@ function renderRow(row) {
     el('span', 'gut', row.new ? String(row.new) : ''),
     el('span', 'sign', row.t === ' ' ? '' : row.t),
   );
+  const txt = el('span', 'txt');
+  renderSegs(txt, row.segs);
+  if (row.noNL) txt.appendChild(el('span', 'nonl', ' ↵ no newline at end of file'));
+  node.appendChild(txt);
+  return node;
+}
+
+function renderNewRow(row) {
+  const node = el('div', row.added ? 'row changed' : 'row');
+  node.appendChild(el('span', 'gut', row.new ? String(row.new) : ''));
   const txt = el('span', 'txt');
   renderSegs(txt, row.segs);
   if (row.noNL) txt.appendChild(el('span', 'nonl', ' ↵ no newline at end of file'));
@@ -480,8 +551,19 @@ function rowTextBefore(row, node, offset) {
  * comparable between cards: a twelve-line tweak reads as a short stub beside a
  * file that was rewritten wholesale.
  */
-const STRIP_PITCH = 4;
+const MAX_BANDS = 14;
+const BAND_PITCH = 16;
 
+/**
+ * The zoomed-out view of a card.
+ *
+ * Rows are aggregated into a small number of bands rather than drawn one pixel
+ * each. Per-row stripes turned a screenful of cards into interleaved red and
+ * green noise — a rainbow, not a shape. Each band is instead a single quiet bar
+ * whose green and red widths are the proportion of additions and deletions in
+ * that slice of the file, so what you read at a glance is "how much, and
+ * where", which is all this view is for.
+ */
 function drawStrip(card) {
   const canvas = card.stripEl;
   const w = Math.max(40, Math.round(card.w));
@@ -495,23 +577,50 @@ function drawStrip(card) {
 
   const rows = card.rows;
   if (!rows.length) return;
-  const pitch = Math.min(h / rows.length, STRIP_PITCH);
-  const band = Math.max(1, pitch);
 
-  for (let i = 0; i < rows.length; i++) {
-    const r = rows[i];
-    let color = '#222830'; // unchanged context, so the file's extent shows
-    if (r.kind === 'line') {
-      if (r.t === '+' || r.changed) color = '#46a758';
-      else if (r.t === '-') color = '#e5534b';
-    } else if (r.kind === 'pair') {
-      if (r.r && r.r.t === '+') color = '#46a758';
-      else if (r.l && r.l.t === '-') color = '#e5534b';
-    } else if (r.kind === 'hunk') {
-      color = '#3a4553';
+  const bands = Math.max(1, Math.min(MAX_BANDS, Math.floor(h / BAND_PITCH), rows.length));
+  const bandH = Math.min(BAND_PITCH, h / bands);
+  const pad = 12;
+  const usable = w - pad * 2;
+
+  // A single quiet spine marks the file's extent. Drawing a background bar per
+  // band instead is what made this read as stripes.
+  ctx.fillStyle = '#232a33';
+  ctx.fillRect(pad, 0, 2, Math.round(bands * (h / bands)));
+
+  for (let b = 0; b < bands; b++) {
+    const from = Math.floor((b * rows.length) / bands);
+    const to = Math.max(from + 1, Math.floor(((b + 1) * rows.length) / bands));
+
+    let adds = 0;
+    let dels = 0;
+    for (let i = from; i < to; i++) {
+      const r = rows[i];
+      if (r.kind === 'line' || r.kind === 'newline') {
+        if (r.t === '+' || r.added || r.changed) adds++;
+        else if (r.t === '-') dels++;
+      } else if (r.kind === 'pair') {
+        if (r.r && r.r.t === '+') adds++;
+        if (r.l && r.l.t === '-') dels++;
+      }
     }
-    ctx.fillStyle = color;
-    ctx.fillRect(0, i * pitch, w, band);
+
+    if (adds === 0 && dels === 0) continue; // untouched stretch: draw nothing
+
+    const total = to - from;
+    const y = Math.round(b * (h / bands));
+    const barH = Math.max(3, bandH - 6);
+    const addW = Math.round((adds / total) * usable);
+    const delW = Math.round((dels / total) * usable);
+
+    if (addW > 0) {
+      ctx.fillStyle = '#3f8f52';
+      ctx.fillRect(pad, y, addW, barH);
+    }
+    if (delW > 0) {
+      ctx.fillStyle = '#b8463f';
+      ctx.fillRect(pad + addW, y, delW, barH);
+    }
   }
 }
 
@@ -561,6 +670,7 @@ export function rebuildAll() {
     if (!card.data) continue;
     card.rows = buildRows(card);
     layoutRows(card);
+    syncViewButtons(card); // 'auto' cards follow the global toggle
   }
 }
 

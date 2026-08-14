@@ -60,7 +60,6 @@ html, body {
   font-family: var(--mono);
   font-size: 12px;
   line-height: 1.45;
-  -webkit-font-smoothing: antialiased;
 }
 
 button, input { font: inherit; color: inherit; }
@@ -99,19 +98,25 @@ body.dragging, body.dragging * { user-select: none !important; }
 
 .tbtn {
   background: var(--surface-2); border: 1px solid var(--border); color: var(--fg-muted);
-  padding: 5px 10px; border-radius: 6px; white-space: nowrap; font-size: 11px;
+  padding: 0 12px; min-height: 30px; border-radius: 6px; white-space: nowrap;
+  font-size: 11px; display: inline-flex; align-items: center;
   transition: color .1s, background .1s, border-color .1s;
 }
 .tbtn:hover { background: var(--surface-3); color: var(--fg); border-color: var(--border-strong); }
+/* Solid, not a 16% tint: the previous active state was too faint to read as
+ * "this one is on". */
 .tbtn.active {
-  background: var(--accent-dim); border-color: var(--accent); color: var(--accent);
+  background: var(--accent); border-color: var(--accent); color: #0d1114; font-weight: 600;
 }
+.tbtn.active:hover { background: var(--accent); color: #0d1114; }
 .tbtn.danger:hover { border-color: var(--del); color: var(--del-fg); background: rgba(229,83,75,.1); }
 
-.seg { display: flex; }
+/* No negative margins: overlapping siblings stole clicks along the seam. */
+.seg { display: flex; gap: 1px; }
 .seg .tbtn { border-radius: 0; }
 .seg .tbtn:first-child { border-radius: 6px 0 0 6px; }
-.seg .tbtn:last-child { border-radius: 0 6px 6px 0; margin-left: -1px; }
+.seg .tbtn:last-child { border-radius: 0 6px 6px 0; }
+.seg .tbtn:hover, .seg .tbtn.active { position: relative; z-index: 1; }
 
 /* [hidden] must beat display:flex, or the bar shows "0 selected" forever. */
 .selection-bar[hidden] { display: none; }
@@ -314,7 +319,10 @@ kbd {
 .card-body::-webkit-scrollbar { width: 9px; height: 9px; }
 .card-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
 .card-body::-webkit-scrollbar-track { background: transparent; }
-.rows { position: absolute; top: 0; left: 0; right: 0; will-change: transform; }
+/* No will-change here. Promoting this to its own compositing layer made the
+ * browser rasterise it once and then scale the bitmap, which is what made the
+ * text look soft at anything other than 100% zoom. */
+.rows { position: absolute; top: 0; left: 0; right: 0; }
 
 .card-foot {
   display: flex; align-items: center; gap: 8px; padding: 4px 7px; flex-shrink: 0;
@@ -325,6 +333,8 @@ kbd {
 
 /* Context is a continuum, not a mode. "all" is simply maximum context, which
  * is why side-by-side keeps working at every step. */
+.foot-seg { display: flex; align-items: center; gap: 0; flex-shrink: 0; }
+.foot-seg + .foot-seg { margin-left: 8px; }
 .ctx-seg { display: flex; align-items: center; gap: 0; flex-shrink: 0; }
 .ctx-label { color: var(--fg-faint); margin-right: 5px; }
 .ctx-seg button {
@@ -333,6 +343,14 @@ kbd {
 }
 .ctx-seg button:hover { color: var(--fg); background: var(--surface-3); }
 .ctx-seg button.on { color: var(--accent); background: var(--accent-dim); border-color: var(--accent); }
+.foot-seg button {
+  color: var(--fg-faint); padding: 1px 6px; font-size: 10px;
+  border: 1px solid transparent; border-radius: 4px;
+}
+.foot-seg button:hover { color: var(--fg); background: var(--surface-3); }
+.foot-seg button.on { color: var(--accent); background: var(--accent-dim); border-color: var(--accent); }
+/* What 'auto' currently resolves to: informative, not a selection. */
+.foot-seg button.resolved { color: var(--accent); background: none; border-color: transparent; }
 
 /* Connection ports, revealed on hover, on the card edges where a link
  * naturally starts and ends. */
