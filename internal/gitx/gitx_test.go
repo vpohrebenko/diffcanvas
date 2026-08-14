@@ -293,9 +293,18 @@ func TestReadFileAndSafeJoin(t *testing.T) {
 		t.Errorf("a.go at HEAD has %d lines, want 5: %q", len(f.Lines), f.Lines)
 	}
 
-	// safeJoin neutralises traversal by anchoring the path at the repo root
-	// rather than rejecting it. The property that matters is that the result
-	// can never land outside the repository.
+	// safeJoin resolves symlinks, so its result is compared against the
+	// resolved root. On macOS a temp dir is /var/folders/... symlinked to
+	// /private/var/..., and comparing against the unresolved root fails there
+	// while passing on Linux.
+	resolvedRoot, err := filepath.EvalSymlinks(r.Root)
+	if err != nil {
+		resolvedRoot = r.Root
+	}
+
+	// Traversal is neutralised by anchoring at the repo root rather than
+	// rejected outright. The property that matters is that the result can
+	// never land outside the repository.
 	for _, attack := range []string{
 		"../../etc/passwd",
 		"../outside.txt",
@@ -306,8 +315,8 @@ func TestReadFileAndSafeJoin(t *testing.T) {
 		if err != nil {
 			continue // rejecting outright is also acceptable
 		}
-		if !strings.HasPrefix(got, r.Root+string(os.PathSeparator)) {
-			t.Errorf("safeJoin(%q) = %q, which escapes %q", attack, got, r.Root)
+		if !strings.HasPrefix(got, resolvedRoot+string(os.PathSeparator)) {
+			t.Errorf("safeJoin(%q) = %q, which escapes %q", attack, got, resolvedRoot)
 		}
 	}
 }
