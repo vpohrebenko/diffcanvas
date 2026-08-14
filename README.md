@@ -223,6 +223,16 @@ diffcanvas -port 8477 -no-open        # on the remote host
 ssh -L 8477:127.0.0.1:8477 user@host  # locally, then open the printed URL
 ```
 
+## Using it from Claude Code
+
+The repository ships a skill at `.claude/skills/review-canvas/`. Ask for a
+change in plain language — "show me this PR", "what did I break in the last
+commit", "compare v1.2 and v1.3" — and it works out the revision range, checks
+it is not empty, starts the server and hands back the URL.
+
+It exists mostly to get the revspec right: three dots for anything
+branch-shaped, and the base branch detected rather than assumed.
+
 ## Development
 
 ```sh
