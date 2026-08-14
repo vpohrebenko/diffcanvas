@@ -12,9 +12,25 @@ import (
 
 // newTestRepo builds a throwaway repository so the tests do not depend on any
 // particular checkout being present.
-func newTestRepo(t *testing.T) *Repo {
+// tempRepoDir returns a temporary directory with symlinks already resolved.
+//
+// On macOS t.TempDir() hands back /var/folders/..., a symlink to
+// /private/var/..., and git reports the resolved path while the test holds the
+// unresolved one. Whether that matters has varied by Go version, so the
+// difference is removed here rather than accommodated at each comparison.
+func tempRepoDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return dir
+	}
+	return resolved
+}
+
+func newTestRepo(t *testing.T) *Repo {
+	t.Helper()
+	dir := tempRepoDir(t)
 
 	run := func(args ...string) {
 		t.Helper()
@@ -343,7 +359,7 @@ func TestSplitLinesNoPhantomTrailingLine(t *testing.T) {
 // taking the first one is not enough either.
 func TestPatchIsolatesRequestedFile(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
+	dir := tempRepoDir(t)
 	r := &Repo{Root: dir}
 
 	git := func(args ...string) {

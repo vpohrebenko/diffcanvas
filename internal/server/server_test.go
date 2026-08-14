@@ -26,7 +26,13 @@ func newHarness(t *testing.T, revspec string) *harness {
 	// Keep layout writes inside the test's temp area.
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
+	// Symlinks resolved: on macOS a temp dir is /var/folders/... pointing at
+	// /private/var/..., and git reports the resolved path while the test holds
+	// the other one.
 	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
 	run := func(args ...string) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
@@ -351,6 +357,9 @@ func TestSymlinkEscapeRejected(t *testing.T) {
 	h := newHarness(t, "")
 
 	outside := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(outside); err == nil {
+		outside = resolved
+	}
 	secret := filepath.Join(outside, "secret.txt")
 	if err := os.WriteFile(secret, []byte("TOP-SECRET-VALUE\n"), 0o644); err != nil {
 		t.Fatal(err)
