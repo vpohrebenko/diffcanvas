@@ -9,7 +9,7 @@
 // which is why side-by-side keeps working at every step of the continuum.
 
 import { api } from './api.js';
-import { state, el, rowH, LOD_SCALE, splitPath } from './store.js';
+import { state, el, rowH, fontScaleOf, BASE_FONT, LOD_SCALE, splitPath } from './store.js';
 import { select, isSelected, selectedCards } from './selection.js';
 
 const OVERSCAN = 6;
@@ -62,6 +62,7 @@ export function createCard(path, opts = {}) {
     // where it drops the empty old-side column. Anything else pins this card.
     view: opts.view ?? 'auto',
     context: opts.context ?? 3,
+    fontScale: opts.fontScale || 0, // 0 = follow the global setting
     pendingLine: opts.line || 0,
     data: null,
     rows: [],
@@ -134,6 +135,18 @@ function buildCardDOM(card) {
   const foot = el('div', 'card-foot');
   const lang = el('span', 'foot-lang', 'loading…');
 
+  // Stepping through the changes, next to the language label so it is visible
+  // without hovering.
+  const navSeg = el('div', 'foot-seg');
+  const prevBtn = el('button', '', '↑');
+  prevBtn.title = 'Previous change (N)';
+  const nextBtn = el('button', '', '↓');
+  nextBtn.title = 'Next change (n)';
+  const changeCount = el('span', 'chg-count', '–');
+  prevBtn.addEventListener('click', ev => { ev.stopPropagation(); jumpChange(card, -1); });
+  nextBtn.addEventListener('click', ev => { ev.stopPropagation(); jumpChange(card, 1); });
+  navSeg.append(prevBtn, nextBtn, changeCount);
+
   const viewSeg = el('div', 'foot-seg');
   viewSeg.appendChild(el('span', 'ctx-label', 'view'));
   for (const opt of VIEW_OPTIONS) {
@@ -166,7 +179,7 @@ function buildCardDOM(card) {
     });
     ctxSeg.appendChild(b);
   }
-  foot.append(lang, viewSeg, ctxSeg);
+  foot.append(lang, navSeg, viewSeg, ctxSeg);
 
   // ── edge ports for arrows ──
   const portL = el('div', 'port left');
@@ -188,7 +201,7 @@ function buildCardDOM(card) {
   Object.assign(card, {
     el: node, headEl: head, bodyEl: body, rowsEl: rows, spacerEl: spacer,
     dotEl: dot, countsEl: counts, langEl: lang, stripEl: strip,
-    ctxSegEl: ctxSeg, viewSegEl: viewSeg,
+    ctxSegEl: ctxSeg, viewSegEl: viewSeg, changeCountEl: changeCount,
   });
 
   body.addEventListener('scroll', () => renderRows(card), { passive: true });
@@ -346,7 +359,8 @@ function applyData(card) {
   card.rows = buildRows(card);
   card.anchors = null;
   card.renderedView = effectiveView(card);
-  layoutRows(card);
+  applyFontScale(card);
+  updateChangeCounter(card);
 
   if (card.pendingLine) {
     scrollToLine(card, card.pendingLine);
@@ -376,19 +390,38 @@ function changeAnchors(card) {
 export function jumpChange(card, dir) {
   const anchors = changeAnchors(card);
   if (!anchors.length) return false;
-  const h = rowH();
-  const current = card.bodyEl.scrollTop / h;
-  let target;
-  if (dir > 0) {
-    target = anchors.find(i => i > current + 0.5);
-    if (target === undefined) target = anchors[0]; // wrap
+  const h = rowH(card);
+  const top = card.bodyEl.scrollTop / h;
+
+  // Stepping used to stick on the first change: the view is scrolled to
+  // anchor-1, so searching for "the next anchor below the top row" found the
+  // very anchor just jumped to. Track the index instead, and fall back to the
+  // scroll position only when the card has been scrolled by hand since.
+  let idx = card.anchorIdx;
+  const onCurrent = idx != null && anchors[idx] != null && Math.abs(anchors[idx] - 1 - top) < 1.5;
+  if (onCurrent) {
+    idx = (idx + dir + anchors.length) % anchors.length; // wraps both ways
+  } else if (dir > 0) {
+    idx = anchors.findIndex(a => a - 1 > top + 0.5);
+    if (idx < 0) idx = 0;
   } else {
-    const before = anchors.filter(i => i < current - 0.5);
-    target = before.length ? before[before.length - 1] : anchors[anchors.length - 1];
+    idx = anchors.length - 1;
+    for (let i = 0; i < anchors.length; i++) if (anchors[i] - 1 < top - 0.5) idx = i;
   }
-  card.bodyEl.scrollTop = Math.max(0, (target - 1) * h);
+
+  card.anchorIdx = idx;
+  card.bodyEl.scrollTop = Math.max(0, (anchors[idx] - 1) * h);
   renderRows(card);
-  return true;
+  updateChangeCounter(card);
+  return { index: idx + 1, total: anchors.length };
+}
+
+/** Keeps the footer's "3/12" in step with the current position. */
+function updateChangeCounter(card) {
+  if (!card.changeCountEl) return;
+  const total = changeAnchors(card).length;
+  card.changeCountEl.textContent =
+    total ? `${card.anchorIdx != null ? card.anchorIdx + 1 : '–'}/${total}` : '–';
 }
 
 /** Scrolls a card so a given new-side line sits near the top. */
@@ -397,7 +430,7 @@ export function scrollToLine(card, line) {
     (r.kind === 'line' && r.new === line) ||
     (r.kind === 'pair' && r.r && r.r.new === line));
   if (index < 0) return;
-  card.bodyEl.scrollTop = Math.max(0, (index - 2) * rowH());
+  card.bodyEl.scrollTop = Math.max(0, (index - 2) * rowH(card));
   renderRows(card);
 }
 
@@ -454,7 +487,8 @@ function buildRows(card) {
 
 function layoutRows(card) {
   card.anchors = null;
-  card.spacerEl.style.height = `${card.rows.length * rowH()}px`;
+  card.anchorIdx = null;
+  card.spacerEl.style.height = `${card.rows.length * rowH(card)}px`;
   card.renderedFirst = card.renderedLast = -1;
   renderRows(card);
   drawStrip(card);
@@ -464,7 +498,7 @@ function renderRows(card) {
   if (card.lod || card.collapsed) return;
 
   const view = card.bodyEl;
-  const h = rowH();
+  const h = rowH(card);
   const first = Math.max(0, Math.floor(view.scrollTop / h) - OVERSCAN);
   const visible = Math.ceil(view.clientHeight / h) + OVERSCAN * 2;
   const last = Math.min(card.rows.length, first + visible);
@@ -476,7 +510,7 @@ function renderRows(card) {
   const frag = document.createDocumentFragment();
   for (let i = first; i < last; i++) frag.appendChild(renderRow(card.rows[i]));
   card.rowsEl.replaceChildren(frag);
-  card.rowsEl.style.transform = `translateY(${first * rowH()}px)`;
+  card.rowsEl.style.transform = `translateY(${first * rowH(card)}px)`;
 }
 
 function renderRow(row) {
@@ -848,11 +882,19 @@ function clearLODLabel(card) {
 }
 
 /** Rebuilds every card after a global unified/split switch. */
-/** Re-lays out every card after the code font size changes. */
+/** Applies a card's font scale to its own CSS, then re-lays it out. */
+export function applyFontScale(card) {
+  const k = fontScaleOf(card);
+  card.el.style.setProperty('--row-h', `${rowH(card)}px`);
+  card.el.style.setProperty('--code-font', `${(BASE_FONT * k).toFixed(2)}px`);
+  layoutRows(card);
+}
+
+/** Re-lays out every card after the global code font size changes. */
 export function relayoutAll() {
   for (const card of state.cards) {
     if (!card.data) continue;
-    layoutRows(card);
+    applyFontScale(card);
   }
 }
 

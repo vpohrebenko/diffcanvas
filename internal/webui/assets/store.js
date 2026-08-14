@@ -11,7 +11,7 @@ export const state = {
   selection: new Set(),
   nextId: 1,
   diffMode: 'unified', // or 'split'
-  lodStyle: 'texture', // zoomed-out card: texture | bars | plain | text
+  lodStyle: 'text',    // zoomed-out card: text | texture | bars | plain
   fontScale: 1,        // code font multiplier
   pan: { x: 60, y: 30 },
   scale: 1,
@@ -27,7 +27,14 @@ export const BASE_FONT = 11;
  * exactly this tall, so anything that changes the code font must update this
  * and --row-h together.
  */
-export function rowH() { return Math.round(BASE_ROW_H * state.fontScale); }
+export function rowH(card) {
+  return Math.round(BASE_ROW_H * fontScaleOf(card));
+}
+
+/** A card's own font scale, falling back to the global one. */
+export function fontScaleOf(card) {
+  return (card && card.fontScale) || state.fontScale;
+}
 
 /** Below this world scale, cards render as a density strip instead of text. */
 export const LOD_SCALE = 0.4;

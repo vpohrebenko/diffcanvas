@@ -5,7 +5,7 @@ import { state, el, toast, debounce, DRAG_TYPE, BASE_ROW_H, BASE_FONT, rowH } fr
 import { renderTree } from './tree.js';
 import {
   createCard, removeCard, setCardListener, applyLOD, rebuildAll, setCollapsed,
-  redrawStrips, relayoutAll, jumpChange,
+  redrawStrips, relayoutAll, jumpChange, applyFontScale,
 } from './card.js';
 import {
   initArrows, renderArrows, loadArrows, toWorld, deleteSelectedArrow, linkImports,
@@ -296,7 +296,8 @@ function snapshot() {
     viewed: [...state.viewed],
     cards: state.cards.map(c => ({
       path: c.path, x: c.x, y: c.y, w: c.w, h: c.h,
-      collapsed: c.collapsed, context: c.context, view: c.view, id: c.id,
+      collapsed: c.collapsed, context: c.context, view: c.view,
+      fontScale: c.fontScale || 0, id: c.id,
     })),
     arrows: state.arrows,
   };
@@ -324,7 +325,7 @@ async function restoreLayout() {
   for (const c of saved.cards) {
     const card = createCard(c.path, {
       x: c.x, y: c.y, w: c.w, h: c.h, context: c.context ?? 3,
-      view: c.view ?? 'auto', duplicate: true,
+      view: c.view ?? 'auto', fontScale: c.fontScale || 0, duplicate: true,
     });
     if (c.collapsed) setCollapsed(card, true);
     remap.set(c.id, card.id);
@@ -438,6 +439,34 @@ function setFontScale(k, apply = true) {
   }
 }
 
+/**
+ * Adjusts the font of the selected cards, or of everything when nothing is
+ * selected — the same rule the rest of the toolbar actions follow.
+ */
+function stepFontScale(delta) {
+  const cards = selectedCards();
+  if (!cards.length) {
+    setFontScale(state.fontScale + delta);
+    return;
+  }
+  for (const c of cards) {
+    c.fontScale = Math.min(2.5, Math.max(0.6, (c.fontScale || state.fontScale) + delta));
+    applyFontScale(c);
+  }
+  toast(`${cards.length} card${cards.length === 1 ? '' : 's'}: font ` +
+        `${Math.round((cards[0].fontScale) * 100)}%`);
+  saveLayoutSoon();
+}
+
+/** Clears per-card overrides, or resets the global scale. */
+function resetFontScale() {
+  const cards = selectedCards();
+  if (!cards.length) { setFontScale(1); return; }
+  for (const c of cards) { c.fontScale = 0; applyFontScale(c); }
+  toast('font reset to the global size');
+  saveLayoutSoon();
+}
+
 const LOD_STYLES = [
   { value: 'texture', label: 'shape', title: 'Code shape: indentation and line length, coloured by change' },
   { value: 'bars', label: 'bars', title: 'How much changed, and roughly where' },
@@ -470,7 +499,9 @@ function stepChange(dir) {
     : state.cards.slice(0, 1);
   if (!cards.length) { toast('open a card first'); return; }
   for (const c of cards) {
-    if (!jumpChange(c, dir)) toast(`${c.path}: no changes to step through`);
+    const at = jumpChange(c, dir);
+    if (!at) toast(`${c.path}: no changes to step through`);
+    else if (cards.length === 1) toast(`change ${at.index} of ${at.total}`);
   }
 }
 
@@ -499,8 +530,9 @@ function showCandidates(sourceCard, res, name, qual) {
   const box = el('div');
   box.id = 'def-picker';
   const label = qual ? `${qual}.${name}` : name;
-  box.appendChild(el('div', 'picker-head',
-    `${label} — ${res.confidence === 'guess' ? 'best guess' : res.confidence}, pick another:`));
+  box.appendChild(el('div', 'picker-head', res.confidence === 'guess'
+    ? `${label} — type could not be determined; pick the definition:`
+    : `${label} — resolved by ${res.confidence}; other candidates:`));
 
   for (const def of [res.def, ...(res.others || [])]) {
     const row = el('button', 'picker-row');
@@ -554,6 +586,16 @@ async function jumpToDefinition(sourceCard, name, qual, line = 0, separate = fal
     guess: ` — best guess, ${(res.others || []).length} other candidate(s)`,
   }[res.confidence] ?? '';
 
+  // A guess means the type could not be worked out — a struct field, an
+  // interface value, something from another package. Opening the best-ranked
+  // candidate there is worse than useless: it looks like an answer. Say so and
+  // let the choice be made explicitly.
+  if (res.confidence === 'guess') {
+    toast(`cannot resolve ${qual ? qual + '.' : ''}${name} — choose the definition`);
+    showCandidates(sourceCard, res, name, qual);
+    return;
+  }
+
   const target = openFile(def.path, { line: def.line, duplicate: separate });
   if (target && target !== sourceCard) {
     addArrow(sourceCard, target, name);
@@ -561,8 +603,8 @@ async function jumpToDefinition(sourceCard, name, qual, line = 0, separate = fal
   toast(`${def.kind} ${def.recv ? def.recv + '.' : ''}${def.name} → ${def.path}:${def.line}${note}`);
   onGeometryChange();
 
-  // Anything less than certain gets the alternatives offered alongside.
-  if (res.ambiguous || res.confidence === 'guess' || res.confidence === 'package-name') {
+  // Resolved, but not beyond doubt: offer the alternatives alongside.
+  if (res.ambiguous || res.confidence === 'package-name') {
     showCandidates(sourceCard, res, name, qual);
   }
 }
@@ -659,9 +701,9 @@ function setupKeys() {
       case 'z': cycleLodStyle(); break;
       case 'n': stepChange(1); break;
       case 'N': stepChange(-1); break;
-      case '+': case '=': ev.preventDefault(); setFontScale(state.fontScale + 0.1); break;
-      case '-': case '_': ev.preventDefault(); setFontScale(state.fontScale - 0.1); break;
-      case '0': ev.preventDefault(); setFontScale(1); break;
+      case '+': case '=': ev.preventDefault(); stepFontScale(0.1); break;
+      case '-': case '_': ev.preventDefault(); stepFontScale(-0.1); break;
+      case '0': ev.preventDefault(); resetFontScale(); break;
       case '\\': document.body.classList.toggle('sidebar-hidden'); break;
     }
   });
