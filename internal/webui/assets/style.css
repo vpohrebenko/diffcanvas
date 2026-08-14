@@ -73,9 +73,13 @@ body.dragging, body.dragging * { user-select: none !important; }
 
 #toolbar {
   position: fixed; inset: 0 0 auto 0; height: var(--toolbar-h); z-index: 300;
-  display: flex; align-items: center; gap: 12px; padding: 0 12px;
+  display: flex; align-items: center; gap: 10px; padding: 0 10px;
   background: var(--surface); border-bottom: 1px solid var(--border);
+  /* The right-hand group is fixed width. On a narrow window it used to push
+   * past the viewport with no way to reach what fell off the edge. */
+  overflow-x: auto; overflow-y: hidden;
 }
+#toolbar::-webkit-scrollbar { height: 0; }
 
 .icon-btn {
   color: var(--fg-muted); padding: 4px 7px; border-radius: 6px; font-size: 13px;
@@ -83,7 +87,7 @@ body.dragging, body.dragging * { user-select: none !important; }
 }
 .icon-btn:hover { color: var(--fg); background: var(--surface-3); }
 
-.spec { flex: 1; min-width: 0; }
+.spec { flex: 1 1 0; min-width: 40px; }
 .spec-label {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-size: 12px; color: var(--fg);
@@ -98,8 +102,8 @@ body.dragging, body.dragging * { user-select: none !important; }
 
 .tbtn {
   background: var(--surface-2); border: 1px solid var(--border); color: var(--fg-muted);
-  padding: 0 12px; min-height: 30px; border-radius: 6px; white-space: nowrap;
-  font-size: 11px; display: inline-flex; align-items: center;
+  padding: 0 11px; min-height: 30px; border-radius: 6px; white-space: nowrap;
+  font-size: 11px; display: inline-flex; align-items: center; flex-shrink: 0;
   transition: color .1s, background .1s, border-color .1s;
 }
 .tbtn:hover { background: var(--surface-3); color: var(--fg); border-color: var(--border-strong); }
@@ -111,12 +115,6 @@ body.dragging, body.dragging * { user-select: none !important; }
 .tbtn.active:hover { background: var(--accent); color: #0d1114; }
 .tbtn.danger:hover { border-color: var(--del); color: var(--del-fg); background: rgba(229,83,75,.1); }
 
-/* No negative margins: overlapping siblings stole clicks along the seam. */
-.seg { display: flex; gap: 1px; }
-.seg .tbtn { border-radius: 0; }
-.seg .tbtn:first-child { border-radius: 6px 0 0 6px; }
-.seg .tbtn:last-child { border-radius: 0 6px 6px 0; }
-.seg .tbtn:hover, .seg .tbtn.active { position: relative; z-index: 1; }
 
 /* [hidden] must beat display:flex, or the bar shows "0 selected" forever. */
 .selection-bar[hidden] { display: none; }

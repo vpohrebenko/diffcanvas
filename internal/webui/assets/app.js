@@ -403,8 +403,8 @@ const LOD_STYLES = [
 function setLodStyle(value, redraw = true) {
   state.lodStyle = value;
   const opt = LOD_STYLES.find(o => o.value === value) || LOD_STYLES[0];
-  document.getElementById('btn-lod').textContent = `zoom: ${opt.label}`;
-  document.getElementById('btn-lod').title = opt.title;
+  document.getElementById('btn-lod').textContent = opt.label;
+  document.getElementById('btn-lod').title = `Zoomed-out cards: ${opt.title} (z)`;
   if (redraw) {
     redrawStrips();
     saveLayoutSoon();
