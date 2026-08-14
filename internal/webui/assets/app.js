@@ -592,15 +592,41 @@ function setupDebugOverlay() {
     'white-space:pre;pointer-events:none;max-width:60vw';
   document.body.appendChild(panel);
 
+  // Outline where the buttons really are. If the outlines sit exactly on the
+  // visible buttons but clicking them reports nothing, the clicks are being
+  // swallowed before they reach the page — by something outside the browser,
+  // not by this layout.
+  const outlines = el('div');
+  outlines.style.cssText = 'position:fixed;inset:0;z-index:99998;pointer-events:none';
+  document.body.appendChild(outlines);
+  const drawOutlines = () => {
+    outlines.replaceChildren();
+    for (const b of document.querySelectorAll('#toolbar button')) {
+      const r = b.getBoundingClientRect();
+      const box = el('div');
+      box.style.cssText =
+        `position:fixed;left:${r.left}px;top:${r.top}px;width:${r.width}px;` +
+        `height:${r.height}px;border:1px solid #f0f;pointer-events:none`;
+      outlines.appendChild(box);
+    }
+  };
+  drawOutlines();
+  window.addEventListener('resize', drawOutlines);
+  setInterval(drawOutlines, 1000);
+
+  let clicks = 0;
+
   const describe = node =>
     !node ? 'null'
       : (node.id ? '#' + node.id : node.tagName.toLowerCase()) +
         (node.className && typeof node.className === 'string' ? '.' + node.className.split(' ')[0] : '');
 
   const report = ev => {
+    clicks++;
     const hit = document.elementFromPoint(ev.clientX, ev.clientY);
     const btn = hit && hit.closest ? hit.closest('button') : null;
     panel.textContent = [
+      `events seen: ${clicks}   (if this does not rise, the click never reached the page)`,
       `dpr=${window.devicePixelRatio}  viewport=${window.innerWidth}x${window.innerHeight}`,
       `zoom=${(window.visualViewport ? window.visualViewport.scale : 1).toFixed(2)}` +
         `  toolbar-h=${getComputedStyle(document.documentElement).getPropertyValue('--toolbar-h').trim()}`,
